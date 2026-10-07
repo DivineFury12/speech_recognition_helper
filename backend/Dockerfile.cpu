@@ -1,0 +1,22 @@
+FROM python:3.11-slim
+
+ENV PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    HF_HOME=/cache/hf \
+    XDG_CACHE_HOME=/cache
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ffmpeg git \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY requirements.txt .
+RUN pip install torch==2.10.0 torchaudio==2.10.0 --index-url https://download.pytorch.org/whl/cpu \
+ && pip install -r requirements.txt \
+ && pip install "gigaam[longform] @ git+https://github.com/salute-developers/GigaAM.git"
+
+COPY app.py .
+
+EXPOSE 8000
+CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000"]

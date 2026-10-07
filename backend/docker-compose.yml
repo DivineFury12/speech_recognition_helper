@@ -1,0 +1,22 @@
+services:
+  gigaam:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      - GIGAAM_MODEL=${GIGAAM_MODEL:-v3_e2e_rnnt}
+      - GIGAAM_DEVICE=cuda
+      - HF_TOKEN=${HF_TOKEN:-}
+    volumes:
+      - model-cache:/cache
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped
+
+volumes:
+  model-cache:

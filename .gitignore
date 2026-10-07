@@ -1,0 +1,40 @@
+# Python-generated files
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+*.egg-info/
+build/
+dist/
+
+# Local Python environments
+.venv/
+venv/
+env/
+
+# Local settings and secrets
+.env
+.env.*
+!.env.example
+!.env.sample
+
+# Downloaded models and local runtime data
+*.ckpt
+*.pt
+*.pth
+*.onnx
+/cache/
+/backend/cache/
+/backend/model-cache/
+/backend/uploads/
+/backend/tmp/
+*.log
+
+# Editor and OS files
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

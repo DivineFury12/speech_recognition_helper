@@ -1,97 +1,92 @@
-import os
-import subprocess
-import tempfile
-import threading
-from contextlib import asynccontextmanager
+import logging
+import contextlib
 
-import gigaam
-import torch
-from fastapi import FastAPI, File, HTTPException, UploadFile
+import fastapi
+import fastapi.responses
 
-MODEL_NAME = os.getenv("GIGAAM_MODEL", "v3_e2e_rnnt")
-DEVICE = os.getenv("GIGAAM_DEVICE", "auto").lower()
-ml = {}
-infer_lock = threading.Lock()
+import src.adapters.transcriber
+import src.adapters.ffmeg
+import src.api.transcribe.router
+import src.errors
+import src.services.transcriber
+import src.settings
 
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    if DEVICE not in {"auto", "cpu", "cuda"}:
-        raise RuntimeError("GIGAAM_DEVICE должен быть auto, cpu или cuda")
-    device = "cuda" if DEVICE == "auto" and torch.cuda.is_available() else DEVICE
-    if device == "auto":
-        device = "cpu"
-    if device == "cuda":
-        if not torch.cuda.is_available():
-            raise RuntimeError("GPU запрошен, но CUDA недоступна внутри контейнера")
+logger = logging.getLogger(__name__)
 
-        torch.ones(1, device="cuda").add_(1)
-        torch.cuda.synchronize()
-    ml["model"] = gigaam.load_model(
-        MODEL_NAME, device=device, download_root="/cache/gigaam"
+
+def create_app(settings: src.settings.Settings | None = None) -> fastapi.FastAPI:
+    config = settings or src.settings.Settings.from_env()
+
+    @contextlib.asynccontextmanager
+    async def lifespan(app: fastapi.FastAPI):
+        config.cache_dir.mkdir(parents=True, exist_ok=True)
+
+        transcriber = src.adapters.transcriber.GigaAMTransciber.load(
+            model_name=config.model_name,
+            requested_device=config.device,
+            cache_dir=config.cache_dir,
+        )
+
+        converter = src.adapters.ffmeg.FFmpegConverter(
+            timeout_seconds=config.ffmpeg_timeout_seconds,
+        )
+
+        app.state.transcription_service = src.services.transcriber.TranscriptionService(
+            converter=converter,
+            transcriber=transcriber,
+        )
+        app.state.health_info = {
+            'model': config.model_name,
+            'device': transcriber.device,
+        }
+
+        yield
+
+        app.state.transcription_service = None
+
+    app = fastapi.FastAPI(
+        title='GigaAM-v3 ASR',
+        lifespan=lifespan,
     )
-    ml["device"] = str(next(ml["model"].parameters()).device)
-    yield
-    ml.clear()
+    app.include_router(src.api.transcribe.router.router)
+
+    @app.exception_handler(src.errors.AudioConversionError)
+    async def handle_conversion_error(
+        request: fastapi.Request,
+        exc: src.errors.AudioConversionError,
+    ) -> fastapi.responses.JSONResponse:
+        logger.warning('Audio conversion failed: %s', exc)
+        return fastapi.responses.JSONResponse(
+            status_code=400,
+            content={'detail': str(exc)},
+        )
+
+    @app.exception_handler(src.errors.InvalidAudioError)
+    async def handle_invalid_audio(
+        request: fastapi.Request,
+        exc: src.errors.InvalidAudioError,
+    ) -> fastapi.responses.JSONResponse:
+        return fastapi.responses.JSONResponse(
+            status_code=400,
+            content={'detail': str(exc)},
+        )
+
+    @app.exception_handler(src.errors.TranscriptionError)
+    async def handle_transcription_error(
+        request: fastapi.Request,
+        exc: src.errors.TranscriptionError,
+    ) -> fastapi.responses.JSONResponse:
+        logger.error(
+            'Transcription failed',
+            exc_info=(type(exc), exc, exc.__traceback__),
+        )
+        return fastapi.responses.JSONResponse(
+            status_code=500,
+            content={'detail': 'Ошибка при распознавании аудио'},
+        )
+
+    return app
 
 
-app = FastAPI(title="GigaAM-v3 ASR", lifespan=lifespan)
-
-
-def to_wav16k(src: str, dst: str):
-    r = subprocess.run(
-        ["ffmpeg", "-y", "-i", src, "-ac", "1", "-ar", "16000", dst],
-        capture_output=True,
-    )
-    if r.returncode != 0:
-        raise HTTPException(400, "Не удалось декодировать аудио")
-
-
-def prepare(upload_bytes: bytes, filename: str, tmp: str) -> str:
-    suffix = os.path.splitext(filename or "")[1] or ".bin"
-    src = os.path.join(tmp, f"in{suffix}")
-    dst = os.path.join(tmp, "out.wav")
-    with open(src, "wb") as f:
-        f.write(upload_bytes)
-    to_wav16k(src, dst)
-    return dst
-
-
-@app.get("/health")
-def health():
-    return {"status": "ok", "model": MODEL_NAME, "device": ml["device"]}
-
-
-@app.post("/transcribe")
-def transcribe(file: UploadFile = File(...)):
-    with tempfile.TemporaryDirectory() as tmp:
-        wav = prepare(file.file.read(), file.filename, tmp)
-        try:
-            with infer_lock:
-                result = ml["model"].transcribe(wav)
-        except ValueError as e:
-            raise HTTPException(400, str(e))
-    return {"text": result.text}
-
-
-@app.post("/transcribe_longform")
-def transcribe_longform(file: UploadFile = File(...)):
-    with tempfile.TemporaryDirectory() as tmp:
-        wav = prepare(file.file.read(), file.filename, tmp)
-        try:
-            with infer_lock:
-                result = ml["model"].transcribe_longform(wav, fr_batch_size=1)
-        except Exception as e:
-            raise HTTPException(
-                500, f"longform недоступен (проверьте HF_TOKEN и gigaam[longform]): {e}"
-            )
-    return {
-        "segments": [
-            {
-                "start": s.start,
-                "end": s.end,
-                "text": s.text,
-            }
-            for s in result.segments
-        ]
-    }
+app = create_app()

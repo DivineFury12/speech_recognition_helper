@@ -46,6 +46,7 @@ class _BaseLLM(_HuggingFaceModel):
         self,
         prompt: str,
         context_blocks: list[str] | None = None,
+        system_prompt: str | None = None,
     ) -> str: ...
 
 
@@ -83,12 +84,13 @@ class _BaseQwen3_5LLM(_BaseLLM):
         self,
         prompt: str,
         context_blocks: list[str] | None = None,
+        system_prompt: str | None = None,
     ) -> str:
         messages = [
             {
                 'role': 'system',
                 'content': [
-                    {'type': 'text', 'text': self.SYSTEM_PROMPT},
+                    {'type': 'text', 'text': system_prompt or self.SYSTEM_PROMPT},
                 ],
             },
         ]

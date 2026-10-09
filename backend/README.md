@@ -28,10 +28,10 @@ Swagger: http://localhost:8000/docs
 текстовые и голосовые запросы ассистенту, уточнения в рамках диалога, задачи,
 напоминания, встречи, поиск и озвучивание ответа.
 
-Статус каждой операции указан в `x-implementation-status`. Сейчас работают только
-`/health`, `/transcribe` и `/transcribe_longform`; остальные ручки описаны для
-разработки фронтенда и пока не доступны в работающем API. `/docs` и
-`/openapi.json` показывают только реализованные FastAPI-маршруты.
+В ветке `experimental/gigachat-backend` реализованы все ручки контракта, кроме
+озвучивания (`/v1/speech/synthesize` отвечает 501). Разбор команд идёт через
+GigaChat с откатом на правила; подробности, переменные окружения и запуск —
+в корневом [README.md](../README.md).
 
 Приоритет указан отдельно в `x-requirement-level`:
 
@@ -62,8 +62,7 @@ Swagger: http://localhost:8000/docs
   `{ "text": "..." }`, не создаёт запись и не выполняет команду. Её можно
   использовать для проверки ASR или предварительного редактирования текста.
 
-Оба маршрута ассистента пока **только описаны в OpenAPI**. Чтобы голосовая и
-текстовая кнопки выполняли команды, их ещё нужно реализовать на сервере.
+В этой ветке оба маршрута ассистента реализованы.
 
 Если реализован уточняющий диалог, фронтенд передаёт полученный
 `conversation_id` в следующем запросе к ассистенту. Время задач и встреч
@@ -75,6 +74,22 @@ Swagger: http://localhost:8000/docs
 - POST /transcribe            — файл до ~25 сек, ответ {"text": "..."}
 - POST /transcribe_longform   — длинное аудио, нужен HF_TOKEN
                                 (HF_TOKEN=xxx docker compose up --build)
+- /v1/...                     — ассистент, записи, диалоги (см. openapi.yaml)
+
+## Переменные ассистента
+
+| Переменная | По умолчанию | Что делает |
+| --- | --- | --- |
+| `LLM_PROVIDER` | авто | `gigachat`, `local` (Qwen из `ml.py`) или `rules` |
+| `GIGACHAT_CREDENTIALS` | — | ключ авторизации GigaChat |
+| `GIGACHAT_SCOPE` | `GIGACHAT_API_PERS` | scope ключа |
+| `GIGACHAT_MODEL` | `GigaChat` | модель GigaChat |
+| `GIGACHAT_VERIFY_SSL` / `GIGACHAT_CA_BUNDLE` | `true` / — | проверка сертификата НУЦ Минцифры |
+| `ASR_ENABLED` | `true` | `false` — не грузить GigaAM (голос отвечает 503) |
+| `DB_PATH` | `data/assistant.db` | файл SQLite |
+| `CORS_ORIGINS` | — | список origin через запятую, если фронт на другом домене |
+
+Тесты: `pip install -r requirements-dev.txt && pytest`.
 
 ## Смена модели
 

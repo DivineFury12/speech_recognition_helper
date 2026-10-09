@@ -3,3 +3,8 @@ __pycache__
 .git
 *.wav
 *.mp3
+.venv
+.env
+data
+tests
+.pytest_cache

@@ -7,8 +7,15 @@ services:
       - GIGAAM_MODEL=${GIGAAM_MODEL:-v3_e2e_rnnt}
       - GIGAAM_DEVICE=cuda
       - HF_TOKEN=${HF_TOKEN:-}
+      - LLM_PROVIDER=${LLM_PROVIDER:-}
+      - GIGACHAT_CREDENTIALS=${GIGACHAT_CREDENTIALS:-}
+      - GIGACHAT_SCOPE=${GIGACHAT_SCOPE:-GIGACHAT_API_PERS}
+      - GIGACHAT_MODEL=${GIGACHAT_MODEL:-GigaChat}
+      - GIGACHAT_VERIFY_SSL=${GIGACHAT_VERIFY_SSL:-true}
+      - CORS_ORIGINS=${CORS_ORIGINS:-}
     volumes:
       - model-cache:/cache
+      - assistant-data:/data
     deploy:
       resources:
         reservations:
@@ -20,3 +27,4 @@ services:
 
 volumes:
   model-cache:
+  assistant-data:

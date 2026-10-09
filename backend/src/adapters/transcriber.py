@@ -83,7 +83,7 @@ class GigaAMTransciber:
                 end=segment.end,
                 text=segment.text,
             )
-            for segment in result
+            for segment in result.segments
             ]
         
         except Exception as exc:

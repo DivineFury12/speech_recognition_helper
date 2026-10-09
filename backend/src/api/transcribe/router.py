@@ -31,13 +31,13 @@ def transcribe(
     return src.schemas.transcribe.TranscribeResponse(text=text)
 
 
-@router.post('/transcribe')
+@router.post('/transcribe_longform')
 def transcribe_longform(
     file: fastapi.UploadFile = fastapi.File(...),
     service: src.services.transcriber.TranscriptionService = (
         fastapi.Depends(get_transcription_service)
     ),
-) -> list[src.schemas.transcribe.TranscriptSegment]:
+) -> src.schemas.transcribe.TranscribeLongformResponse:
     segments = service.transcribe_longform(
         file.file,
         file.filename,

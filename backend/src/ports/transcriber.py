@@ -13,7 +13,7 @@ class Transcriber(typing.Protocol):
     def transcribe_longform(
         self,
         audio_path: pathlib.Path
-    ) -> list[src.schemas.transcribe.AudioSegment]:
+    ) -> list[src.schemas.transcribe.TranscriptSegment]:
         ...
 
 

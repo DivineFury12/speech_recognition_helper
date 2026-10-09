@@ -6,6 +6,7 @@ import fastapi.responses
 
 import src.adapters.transcriber
 import src.adapters.ffmeg
+import src.api.assistant.router
 import src.api.transcribe.router
 import src.errors
 import src.services.transcriber
@@ -49,7 +50,9 @@ def create_app(settings: src.settings.Settings | None = None) -> fastapi.FastAPI
         title='GigaAM-v3 ASR',
         lifespan=lifespan,
     )
+    app.state.assistant_service = None
     app.include_router(src.api.transcribe.router.router)
+    app.include_router(src.api.assistant.router.router)
 
     @app.exception_handler(src.errors.AudioConversionError)
     async def handle_conversion_error(

@@ -4,7 +4,8 @@ info:
   version: 0.1.0
   description: |
     Контракт прототипа для фронтенда. Ручки с x-implementation-status: implemented
-    уже работают в ASR-сервисе; planned описывают следующий этап разработки.
+    уже работают; partial доступны в API, но пока не выполняют команды и отвечают
+    501 до подключения бизнес-логики и хранилища; planned описывают следующий этап.
     x-requirement-level: core отмечает публичные ручки минимального сценария,
     supporting — полезные технические и прямые ручки для фронтенда, additional —
     дополнительный функционал. Действия списка и поиска обязательны внутри
@@ -107,7 +108,7 @@ paths:
         при необходимости сохраняет или ищет записи и возвращает ответ.
         Если не хватает данных, status = needs_clarification; следующий ответ
         пользователя отправляется с тем же conversation_id.
-      x-implementation-status: planned
+      x-implementation-status: partial
       x-requirement-level: core
       requestBody:
         required: true
@@ -134,6 +135,8 @@ paths:
                 $ref: '#/components/schemas/AssistantTurn'
         '422':
           $ref: '#/components/responses/ValidationError'
+        '501':
+          $ref: '#/components/responses/NotImplemented'
   /v1/assistant/audio:
     post:
       tags: [Assistant]
@@ -144,7 +147,7 @@ paths:
         одним multipart-запросом. Сервер распознаёт речь, передаёт полученный текст
         в ту же логику ассистента, что использует POST /v1/assistant/messages,
         и возвращает AssistantTurn с распознанным текстом в user_text.
-      x-implementation-status: planned
+      x-implementation-status: partial
       x-requirement-level: core
       requestBody:
         required: true
@@ -177,6 +180,8 @@ paths:
           $ref: '#/components/responses/BadRequest'
         '422':
           $ref: '#/components/responses/ValidationError'
+        '501':
+          $ref: '#/components/responses/NotImplemented'
   /v1/conversations/{conversation_id}/messages:
     get:
       tags: [Conversations]
@@ -420,6 +425,12 @@ components:
             $ref: '#/components/schemas/ErrorResponse'
     InternalError:
       description: Не удалось выполнить операцию
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    NotImplemented:
+      description: Обработка команд ассистента пока не подключена
       content:
         application/json:
           schema:

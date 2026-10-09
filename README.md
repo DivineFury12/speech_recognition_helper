@@ -73,6 +73,27 @@ uvicorn app:app --host 127.0.0.1 --port 8000
 Без ключа сервер работает на правилах. Если GigaAM не установлен, сервер
 стартует без распознавания речи: текст работает, голосовые ручки отвечают 503.
 
+### Голос локально (Windows, NVIDIA)
+
+Проверено на RTX 2060 6 ГБ: GigaAM на `cuda:0`, фраза распознаётся за ~1 с.
+
+```powershell
+winget install Gyan.FFmpeg          # браузер присылает webm/opus, без ffmpeg не декодировать
+# перезапустить терминал, чтобы ffmpeg попал в PATH
+cd backend
+.venv\Scripts\activate
+pip install torch==2.10.0 torchaudio==2.10.0 --index-url https://download.pytorch.org/whl/cu126
+"torch==2.10.0+cu126`ntorchaudio==2.10.0+cu126" | Out-File -Encoding ascii constraints.txt
+pip install -c constraints.txt --extra-index-url https://download.pytorch.org/whl/cu126 "gigaam[longform] @ git+https://github.com/salute-developers/GigaAM.git"
+del constraints.txt
+```
+
+`constraints.txt` нужен, чтобы установка GigaAM не заменила CUDA-сборку torch на
+CPU-версию из PyPI. Без видеокарты ставьте torch с `--index-url .../whl/cpu`.
+
+При первом старте сервер скачает веса GigaAM (~430 МБ) в `backend/.cache/gigaam`.
+Готовность: `GET /health` вернёт `"device": "cuda:0"`.
+
 ### Бэкенд в Docker (с распознаванием речи)
 
 ```bash
@@ -124,8 +145,9 @@ pytest
   «через 2 часа», поиск, списки): все разобраны моделью, без отката на правила,
   ответ около 0,5 с. На живых формулировках промпт в `backend/assistant/nlu.py`
   может потребовать доводки.
-- Голос с живым GigaAM не проверен: локально GigaAM не установлен, Docker не собирался.
-  Проверено только с подменённым распознаванием.
+- **Голос проверен локально** на RTX 2060: синтезированные русские фразы в webm/opus
+  → GigaAM → GigaChat, включая уточнение по `conversation_id`. С живым микрофоном
+  в браузере и в Docker не проверялся.
 - Поиск пока по словам (с учётом окончаний). Эмбеддинги FRIDA из `ml.py` можно подключить следующим шагом.
 - Озвучивание ответа (`/v1/speech/synthesize`) не реализовано.
 - Один пользователь, без авторизации, как и предполагает контракт.

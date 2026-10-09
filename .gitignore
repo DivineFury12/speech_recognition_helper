@@ -28,6 +28,7 @@ env/
 *.onnx
 /cache/
 /backend/cache/
+/backend/.cache/
 /backend/model-cache/
 /backend/uploads/
 /backend/tmp/

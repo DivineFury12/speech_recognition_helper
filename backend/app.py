@@ -18,6 +18,10 @@ from assistant.storage import Storage
 
 MODEL_NAME = os.getenv("GIGAAM_MODEL", "v3_e2e_rnnt")
 DEVICE = os.getenv("GIGAAM_DEVICE", "auto").lower()
+GIGAAM_CACHE = os.getenv(
+    "GIGAAM_CACHE",
+    "/cache/gigaam" if os.path.isdir("/cache") else os.path.join(os.path.dirname(os.path.abspath(__file__)), ".cache", "gigaam"),
+)
 ml = {}
 infer_lock = threading.Lock()
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"), format="%(levelname)s %(name)s: %(message)s")
@@ -41,7 +45,7 @@ def load_asr():
         torch.ones(1, device="cuda").add_(1)
         torch.cuda.synchronize()
     ml["model"] = gigaam.load_model(
-        MODEL_NAME, device=device, download_root=os.getenv("GIGAAM_CACHE", "/cache/gigaam")
+        MODEL_NAME, device=device, download_root=GIGAAM_CACHE
     )
     ml["device"] = str(next(ml["model"].parameters()).device)
 

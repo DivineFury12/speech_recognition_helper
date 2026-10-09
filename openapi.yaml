@@ -4,7 +4,7 @@ info:
   version: 0.1.0
   description: |
     Контракт прототипа для фронтенда. Ручки с x-implementation-status: implemented
-    уже работают в ASR-сервисе; planned описывают следующий этап разработки.
+    работают в ветке experimental/gigachat-backend; planned — ещё нет.
     x-requirement-level: core отмечает публичные ручки минимального сценария,
     supporting — полезные технические и прямые ручки для фронтенда, additional —
     дополнительный функционал. Действия списка и поиска обязательны внутри
@@ -13,7 +13,10 @@ info:
     один запрос с аудиофайлом, распознавание и обработка команды на сервере.
     Текстовый маршрут — POST /v1/assistant/messages. Оба возвращают AssistantTurn.
     POST /transcribe только возвращает текст и не выполняет команду.
-    Пока предполагается один пользователь без авторизации.
+    Пользователи различаются по подписанной HttpOnly-куке sa_session, которую
+    сервер выдаёт сам (без логина и пароля). Запросы POST/PATCH/DELETE с этой
+    кукой должны содержать заголовок X-Requested-With: assistant (защита от CSRF).
+    Если на сервере задан ACCESS_CODE, перед работой нужен POST /v1/session/unlock.
 servers:
   - url: http://localhost:8000
     description: Локальный backend
@@ -24,7 +27,104 @@ tags:
   - name: Entries
   - name: Conversations
   - name: Speech synthesis
+  - name: Session
+  - name: Calendar
 paths:
+  /v1/session:
+    get:
+      tags: [Session]
+      operationId: getSession
+      summary: Узнать текущую сессию и нужен ли код доступа
+      x-implementation-status: implemented
+      x-requirement-level: additional
+      responses:
+        '200':
+          description: Сессия браузера
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SessionInfo'
+  /v1/session/unlock:
+    post:
+      tags: [Session]
+      operationId: unlockSession
+      summary: Ввести код доступа (если на сервере задан ACCESS_CODE)
+      x-implementation-status: implemented
+      x-requirement-level: additional
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [code]
+              properties:
+                code:
+                  type: string
+                  minLength: 1
+      responses:
+        '204':
+          description: Код принят, кука обновлена
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+  /v1/entries/undated:
+    get:
+      tags: [Entries]
+      operationId: listUndatedEntries
+      summary: Получить задачи без срока
+      x-implementation-status: implemented
+      x-requirement-level: additional
+      responses:
+        '200':
+          description: Записи без даты, невыполненные первыми
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EntryList'
+  /v1/calendar:
+    get:
+      tags: [Calendar]
+      operationId: getCalendarLink
+      summary: Получить ссылку на календарь в формате iCalendar
+      description: Ссылку можно добавить в Google, Apple или Outlook Calendar как подписку.
+      x-implementation-status: implemented
+      x-requirement-level: additional
+      responses:
+        '200':
+          description: Персональная ссылка
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [url]
+                properties:
+                  url:
+                    type: string
+  /v1/calendar/feed/{token}.ics:
+    get:
+      tags: [Calendar]
+      operationId: getCalendarFeed
+      summary: Календарь пользователя (iCalendar)
+      description: Доступ по токену из ссылки, кука не нужна.
+      x-implementation-status: implemented
+      x-requirement-level: additional
+      parameters:
+        - name: token
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Файл iCalendar
+          content:
+            text/calendar:
+              schema:
+                type: string
+        '404':
+          $ref: '#/components/responses/NotFound'
   /health:
     get:
       tags: [System]
@@ -107,7 +207,7 @@ paths:
         при необходимости сохраняет или ищет записи и возвращает ответ.
         Если не хватает данных, status = needs_clarification; следующий ответ
         пользователя отправляется с тем же conversation_id.
-      x-implementation-status: planned
+      x-implementation-status: implemented
       x-requirement-level: core
       requestBody:
         required: true
@@ -144,7 +244,7 @@ paths:
         одним multipart-запросом. Сервер распознаёт речь, передаёт полученный текст
         в ту же логику ассистента, что использует POST /v1/assistant/messages,
         и возвращает AssistantTurn с распознанным текстом в user_text.
-      x-implementation-status: planned
+      x-implementation-status: implemented
       x-requirement-level: core
       requestBody:
         required: true
@@ -182,7 +282,7 @@ paths:
       tags: [Conversations]
       operationId: listConversationMessages
       summary: Получить историю диалога
-      x-implementation-status: planned
+      x-implementation-status: implemented
       x-requirement-level: additional
       parameters:
         - $ref: '#/components/parameters/ConversationId'
@@ -210,7 +310,7 @@ paths:
       operationId: listEntries
       summary: Получить задачи, напоминания и встречи за период
       description: Границы периода включительно, сравнение по локальной дате записи.
-      x-implementation-status: planned
+      x-implementation-status: implemented
       x-requirement-level: supporting
       parameters:
         - name: date_from
@@ -249,7 +349,7 @@ paths:
       description: |
         Используется формой фронтенда. Для встречи и напоминания обязательны date
         и time; для задачи они могут отсутствовать. Голосовой сценарий идёт через Assistant.
-      x-implementation-status: planned
+      x-implementation-status: implemented
       x-requirement-level: additional
       requestBody:
         required: true
@@ -275,7 +375,7 @@ paths:
         Поиск старых записей обязателен и не должен требовать дословного
         совпадения запроса с названием. Семантический поиск близких по смыслу
         формулировок желателен как улучшение.
-      x-implementation-status: planned
+      x-implementation-status: implemented
       x-requirement-level: supporting
       parameters:
         - name: q
@@ -303,7 +403,7 @@ paths:
       tags: [Entries]
       operationId: getEntry
       summary: Получить запись по идентификатору
-      x-implementation-status: planned
+      x-implementation-status: implemented
       x-requirement-level: additional
       parameters:
         - $ref: '#/components/parameters/EntryId'
@@ -320,7 +420,7 @@ paths:
       tags: [Entries]
       operationId: updateEntry
       summary: Изменить запись или отметить задачу выполненной
-      x-implementation-status: planned
+      x-implementation-status: implemented
       x-requirement-level: additional
       parameters:
         - $ref: '#/components/parameters/EntryId'
@@ -345,7 +445,7 @@ paths:
       tags: [Entries]
       operationId: deleteEntry
       summary: Удалить запись
-      x-implementation-status: planned
+      x-implementation-status: implemented
       x-requirement-level: additional
       parameters:
         - $ref: '#/components/parameters/EntryId'
@@ -359,6 +459,7 @@ paths:
       tags: [Speech synthesis]
       operationId: synthesizeSpeech
       summary: Озвучить текст ответа ассистента
+      description: Не реализовано на сервере (501); фронтенд озвучивает ответы через Web Speech API браузера.
       x-implementation-status: planned
       x-requirement-level: additional
       requestBody:
@@ -414,6 +515,18 @@ components:
             $ref: '#/components/schemas/ErrorResponse'
     NotFound:
       description: Запись или диалог не найдены
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    Unauthorized:
+      description: Нужен или неверен код доступа
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    TooManyRequests:
+      description: Превышен лимит запросов
       content:
         application/json:
           schema:
@@ -512,7 +625,7 @@ components:
           enum: [completed, needs_clarification, no_action]
         intent:
           type: string
-          enum: [create_entry, list_entries, search_entries, unknown]
+          enum: [create_entry, list_entries, search_entries, update_entry, delete_entry, complete_entry, unknown]
         entries:
           type: array
           description: Созданные или найденные записи; пустой список при уточнении.
@@ -547,6 +660,27 @@ components:
     EntryStatus:
       type: string
       enum: [pending, completed, cancelled]
+    Recurrence:
+      type: string
+      nullable: true
+      enum: [daily, weekdays, weekly, monthly, null]
+      description: Повтор записи; null — разовая.
+    SessionInfo:
+      type: object
+      required: [user_id, access_code_required, unlocked, llm_provider, asr_enabled]
+      properties:
+        user_id:
+          type: string
+          format: uuid
+        access_code_required:
+          type: boolean
+        unlocked:
+          type: boolean
+        llm_provider:
+          type: string
+          example: gigachat
+        asr_enabled:
+          type: boolean
     Entry:
       type: object
       description: Статус выполнения и дата изменения не обязательны для MVP.
@@ -578,6 +712,8 @@ components:
           minimum: 1
           nullable: true
           description: Длительность встречи; для остальных типов null.
+        recurrence:
+          $ref: '#/components/schemas/Recurrence'
         status:
           $ref: '#/components/schemas/EntryStatus'
         created_at:
@@ -612,6 +748,8 @@ components:
           type: integer
           minimum: 1
           nullable: true
+        recurrence:
+          $ref: '#/components/schemas/Recurrence'
     EntryUpdate:
       type: object
       minProperties: 1
@@ -633,6 +771,8 @@ components:
           type: integer
           minimum: 1
           nullable: true
+        recurrence:
+          $ref: '#/components/schemas/Recurrence'
         status:
           $ref: '#/components/schemas/EntryStatus'
     EntryList:

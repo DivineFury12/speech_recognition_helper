@@ -3,13 +3,20 @@ import uuid
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, File, Form, HTTPException, Query, Request, Response, UploadFile
+from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from .calendar_ics import build_calendar
 from .service import Assistant, InvalidTimezone, resolve_timezone
 
 TIME_PATTERN = r"^([01][0-9]|2[0-3]):[0-5][0-9]$"
 EntryKind = Literal["task", "reminder", "meeting"]
 EntryStatus = Literal["pending", "completed", "cancelled"]
+Recurrence = Literal["daily", "weekdays", "weekly", "monthly"]
+Intent = Literal[
+    "create_entry", "list_entries", "search_entries",
+    "update_entry", "delete_entry", "complete_entry", "unknown",
+]
 
 
 class Entry(BaseModel):
@@ -20,6 +27,7 @@ class Entry(BaseModel):
     time: str | None
     timezone: str
     duration_minutes: int | None = None
+    recurrence: Recurrence | None = None
     status: EntryStatus | None = None
     created_at: str
     updated_at: str | None = None
@@ -35,12 +43,12 @@ class AssistantTurn(BaseModel):
     user_text: str
     assistant_text: str
     status: Literal["completed", "needs_clarification", "no_action"]
-    intent: Literal["create_entry", "list_entries", "search_entries", "unknown"]
+    intent: Intent
     entries: list[Entry]
 
 
 class TextMessageRequest(BaseModel):
-    text: str = Field(min_length=1)
+    text: str = Field(min_length=1, max_length=2000)
     timezone: str
     conversation_id: uuid.UUID | None = None
 
@@ -63,11 +71,12 @@ def _check_tz(v: str | None) -> str | None:
 
 class EntryCreate(BaseModel):
     kind: EntryKind
-    title: str = Field(min_length=1)
+    title: str = Field(min_length=1, max_length=500)
     date: dt.date | None = None
     time: str | None = Field(default=None, pattern=TIME_PATTERN)
     timezone: str
     duration_minutes: int | None = Field(default=None, ge=1)
+    recurrence: Recurrence | None = None
 
     @field_validator("timezone")
     @classmethod
@@ -78,15 +87,18 @@ class EntryCreate(BaseModel):
     def date_time_required(self):
         if self.kind in ("meeting", "reminder") and (self.date is None or self.time is None):
             raise ValueError("для встречи и напоминания обязательны date и time")
+        if self.recurrence and self.date is None:
+            raise ValueError("для повторяющейся записи нужна date")
         return self
 
 
 class EntryUpdate(BaseModel):
-    title: str | None = Field(default=None, min_length=1)
+    title: str | None = Field(default=None, min_length=1, max_length=500)
     date: dt.date | None = None
     time: str | None = Field(default=None, pattern=TIME_PATTERN)
     timezone: str | None = None
     duration_minutes: int | None = Field(default=None, ge=1)
+    recurrence: Recurrence | None = None
     status: EntryStatus | None = None
 
     @field_validator("timezone")
@@ -107,8 +119,28 @@ class ConversationMessages(BaseModel):
     messages: list[ConversationMessage]
 
 
+class SessionInfo(BaseModel):
+    user_id: str
+    access_code_required: bool
+    unlocked: bool
+    llm_provider: str
+    asr_enabled: bool
+
+
+class UnlockRequest(BaseModel):
+    code: str = Field(min_length=1, max_length=200)
+
+
+class CalendarLink(BaseModel):
+    url: str
+
+
 def _assistant(request: Request) -> Assistant:
     return request.app.state.assistant
+
+
+def _user(request: Request) -> str:
+    return request.state.session.user_id
 
 
 def _uuid_or_422(value: str | None, name: str) -> str | None:
@@ -128,14 +160,49 @@ def _tz_or_422(value: str) -> str:
     return value
 
 
+def _rate_limit(request: Request) -> None:
+    limiter = getattr(request.app.state, "assistant_limiter", None)
+    if limiter and not limiter.allow(_user(request)):
+        raise HTTPException(429, "Слишком много запросов, подождите минуту")
+
+
 router = APIRouter(prefix="/v1")
+
+
+@router.get("/session", response_model=SessionInfo, tags=["Session"])
+def get_session(request: Request):
+    sessions = request.app.state.sessions
+    session = request.state.session
+    return {
+        "user_id": session.user_id,
+        "access_code_required": bool(sessions.access_code),
+        "unlocked": session.unlocked or not sessions.access_code,
+        "llm_provider": request.app.state.llm_name,
+        "asr_enabled": request.app.state.asr_ready(),
+    }
+
+
+@router.post("/session/unlock", status_code=204, tags=["Session"])
+def unlock_session(body: UnlockRequest, request: Request):
+    sessions = request.app.state.sessions
+    if not sessions.access_code:
+        return Response(status_code=204)
+    client = request.client.host if request.client else "unknown"
+    if not request.app.state.unlock_limiter.allow(client):
+        raise HTTPException(429, "Слишком много попыток, попробуйте позже")
+    if not sessions.check_code(body.code):
+        raise HTTPException(401, "Неверный код доступа")
+    request.state.session.unlocked = True
+    request.state.cookie_dirty = True
+    return Response(status_code=204)
 
 
 @router.post("/assistant/messages", response_model=AssistantTurn, response_model_exclude_unset=True, tags=["Assistant"])
 def send_text_message(body: TextMessageRequest, request: Request):
+    _rate_limit(request)
     tz = _tz_or_422(body.timezone)
     cid = str(body.conversation_id) if body.conversation_id else None
-    return _assistant(request).handle(body.text, tz, cid)
+    return _assistant(request).handle(body.text, tz, cid, user_id=_user(request))
 
 
 @router.post("/assistant/audio", response_model=AssistantTurn, response_model_exclude_unset=True, tags=["Assistant"])
@@ -145,12 +212,13 @@ def send_audio_message(
     timezone: str = Form(...),
     conversation_id: str | None = Form(default=None),
 ):
+    _rate_limit(request)
     tz = _tz_or_422(timezone)
     cid = _uuid_or_422(conversation_id, "conversation_id")
     text = request.app.state.transcribe_upload(file)
     assistant = _assistant(request)
     if not text.strip():
-        cid = assistant.storage.ensure_conversation(cid)
+        cid = assistant.storage.ensure_conversation(cid, _user(request))
         return {
             "conversation_id": cid,
             "turn_id": str(uuid.uuid4()),
@@ -160,14 +228,14 @@ def send_audio_message(
             "intent": "unknown",
             "entries": [],
         }
-    return assistant.handle(text.strip(), tz, cid)
+    return assistant.handle(text.strip(), tz, cid, user_id=_user(request))
 
 
 @router.get("/conversations/{conversation_id}/messages", response_model=ConversationMessages, tags=["Conversations"])
 def list_conversation_messages(conversation_id: uuid.UUID, request: Request):
     storage = _assistant(request).storage
     cid = str(conversation_id)
-    if not storage.conversation_exists(cid):
+    if not storage.conversation_exists(cid, _user(request)):
         raise HTTPException(404, "Диалог не найден")
     return {"conversation_id": cid, "messages": storage.list_messages(cid)}
 
@@ -182,8 +250,17 @@ def list_entries(
 ):
     if date_from > date_to:
         raise HTTPException(422, "date_from позже date_to")
-    items = _assistant(request).storage.list_entries(date_from.isoformat(), date_to.isoformat(), kind, status)
+    if (date_to - date_from).days > 366:
+        raise HTTPException(422, "Период не может быть больше года")
+    items = _assistant(request).storage.list_entries(
+        date_from.isoformat(), date_to.isoformat(), kind, status, user_id=_user(request)
+    )
     return {"items": items}
+
+
+@router.get("/entries/undated", response_model=EntryList, response_model_exclude_unset=True, tags=["Entries"])
+def list_undated_entries(request: Request):
+    return {"items": _assistant(request).storage.undated_entries(_user(request))}
 
 
 @router.post("/entries", response_model=Entry, status_code=201, response_model_exclude_unset=True, tags=["Entries"])
@@ -194,21 +271,24 @@ def create_entry(body: EntryCreate, request: Request):
         date=body.date.isoformat() if body.date else None,
         time=body.time,
         timezone=body.timezone,
-        duration_minutes=body.duration_minutes if body.kind == "meeting" else None,
+        duration_minutes=(body.duration_minutes or 60) if body.kind == "meeting" else None,
+        recurrence=body.recurrence,
+        user_id=_user(request),
     )
 
 
 @router.get("/entries/search", response_model=EntryList, response_model_exclude_unset=True, tags=["Entries"])
-def search_entries(request: Request, q: Annotated[str, Query(min_length=1)], kind: EntryKind | None = None):
+def search_entries(request: Request, q: Annotated[str, Query(min_length=1, max_length=500)],
+                   kind: EntryKind | None = None):
     from .search import search_entries as rank
 
-    storage = _assistant(request).storage
-    return {"items": rank(q, storage.all_entries(kind))}
+    assistant = _assistant(request)
+    return {"items": rank(q, assistant.storage.all_entries(kind, _user(request)), llm=assistant.llm)}
 
 
 @router.get("/entries/{entry_id}", response_model=Entry, response_model_exclude_unset=True, tags=["Entries"])
 def get_entry(entry_id: uuid.UUID, request: Request):
-    entry = _assistant(request).storage.get_entry(str(entry_id))
+    entry = _assistant(request).storage.get_entry(str(entry_id), _user(request))
     if entry is None:
         raise HTTPException(404, "Запись не найдена")
     return entry
@@ -219,19 +299,41 @@ def update_entry(entry_id: uuid.UUID, body: EntryUpdate, request: Request):
     changes = body.model_dump(exclude_unset=True)
     if not changes:
         raise HTTPException(422, "Нужно передать хотя бы одно поле")
-    if "date" in changes and changes["date"] is not None:
+    if changes.get("date") is not None:
         changes["date"] = changes["date"].isoformat()
-    entry = _assistant(request).storage.update_entry(str(entry_id), changes)
-    if entry is None:
+    storage = _assistant(request).storage
+    current = storage.get_entry(str(entry_id), _user(request))
+    if current is None:
         raise HTTPException(404, "Запись не найдена")
-    return entry
+    merged = {**current, **changes}
+    if merged["kind"] in ("meeting", "reminder") and (not merged.get("date") or not merged.get("time")):
+        raise HTTPException(422, "для встречи и напоминания обязательны date и time")
+    if merged.get("recurrence") and not merged.get("date"):
+        raise HTTPException(422, "для повторяющейся записи нужна date")
+    return storage.update_entry(str(entry_id), changes, _user(request))
 
 
 @router.delete("/entries/{entry_id}", status_code=204, tags=["Entries"])
 def delete_entry(entry_id: uuid.UUID, request: Request):
-    if not _assistant(request).storage.delete_entry(str(entry_id)):
+    if not _assistant(request).storage.delete_entry(str(entry_id), _user(request)):
         raise HTTPException(404, "Запись не найдена")
     return Response(status_code=204)
+
+
+@router.get("/calendar", response_model=CalendarLink, tags=["Calendar"])
+def calendar_link(request: Request):
+    token = request.app.state.sessions.feed_token(_user(request))
+    return {"url": str(request.base_url).rstrip("/") + f"/v1/calendar/feed/{token}.ics"}
+
+
+@router.get("/calendar/feed/{token}.ics", tags=["Calendar"], response_class=PlainTextResponse)
+def calendar_feed(token: str, request: Request):
+    user_id = request.app.state.sessions.feed_user(token)
+    if user_id is None:
+        raise HTTPException(404, "Календарь не найден")
+    body = build_calendar(_assistant(request).storage.all_entries(None, user_id))
+    return Response(content=body, media_type="text/calendar; charset=utf-8",
+                    headers={"Content-Disposition": 'inline; filename="assistant.ics"'})
 
 
 class SynthesizeRequest(BaseModel):
@@ -240,4 +342,4 @@ class SynthesizeRequest(BaseModel):
 
 @router.post("/speech/synthesize", tags=["Speech synthesis"])
 def synthesize_speech(body: SynthesizeRequest):
-    raise HTTPException(501, "Озвучивание пока не реализовано")
+    raise HTTPException(501, "Озвучивание выполняется в браузере (Web Speech API), серверный синтез не подключён")

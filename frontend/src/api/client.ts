@@ -1,4 +1,14 @@
-import type { AssistantTurn, EntryList, ErrorResponse, HealthResponse, ListEntriesQuery, TextMessageRequest } from './types'
+import type {
+  AssistantTurn,
+  Entry,
+  EntryList,
+  EntryUpdate,
+  ErrorResponse,
+  HealthResponse,
+  ListEntriesQuery,
+  SessionInfo,
+  TextMessageRequest,
+} from './types'
 
 const BASE_URL = (import.meta.env.VITE_API_URL ?? '').replace(/\/+$/, '')
 
@@ -14,10 +24,23 @@ export class ApiError extends Error {
   }
 }
 
-async function request<T>(path: string, init: RequestInit = {}, timeoutMs = DEFAULT_TIMEOUT_MS): Promise<T> {
+type Listener = (status: number) => void
+const authListeners = new Set<Listener>()
+
+export function onAuthError(listener: Listener): () => void {
+  authListeners.add(listener)
+  return () => authListeners.delete(listener)
+}
+
+async function send(path: string, init: RequestInit = {}, timeoutMs = DEFAULT_TIMEOUT_MS): Promise<Response> {
   let res: Response
   try {
-    res = await fetch(`${BASE_URL}${path}`, { ...init, signal: AbortSignal.timeout(timeoutMs) })
+    res = await fetch(`${BASE_URL}${path}`, {
+      ...init,
+      credentials: 'include',
+      headers: { 'X-Requested-With': 'assistant', ...(init.headers ?? {}) },
+      signal: AbortSignal.timeout(timeoutMs),
+    })
   } catch (e) {
     if (e instanceof DOMException && e.name === 'TimeoutError') {
       throw new ApiError('Сервер не ответил вовремя. Попробуйте ещё раз.', null)
@@ -30,17 +53,25 @@ async function request<T>(path: string, init: RequestInit = {}, timeoutMs = DEFA
       const body = (await res.json()) as Partial<ErrorResponse>
       if (typeof body.detail === 'string') detail = body.detail
     } catch {}
+    if (res.status === 401) authListeners.forEach((l) => l(res.status))
     throw new ApiError(detail, res.status)
   }
+  return res
+}
+
+async function request<T>(path: string, init: RequestInit = {}, timeoutMs = DEFAULT_TIMEOUT_MS): Promise<T> {
+  const res = await send(path, init, timeoutMs)
   return (await res.json()) as T
 }
 
+const json = (method: string, body: unknown): RequestInit => ({
+  method,
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify(body),
+})
+
 export function sendTextMessage(body: TextMessageRequest): Promise<AssistantTurn> {
-  return request(
-    '/v1/assistant/messages',
-    { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) },
-    ASSISTANT_TIMEOUT_MS,
-  )
+  return request('/v1/assistant/messages', json('POST', body), ASSISTANT_TIMEOUT_MS)
 }
 
 export function sendAudioMessage(params: {
@@ -60,6 +91,30 @@ export function listEntries(query: ListEntriesQuery): Promise<EntryList> {
   const qs = new URLSearchParams()
   for (const [k, v] of Object.entries(query)) if (v != null) qs.set(k, String(v))
   return request(`/v1/entries?${qs}`)
+}
+
+export function listUndatedEntries(): Promise<EntryList> {
+  return request('/v1/entries/undated')
+}
+
+export function updateEntry(id: string, changes: EntryUpdate): Promise<Entry> {
+  return request(`/v1/entries/${id}`, json('PATCH', changes))
+}
+
+export async function deleteEntry(id: string): Promise<void> {
+  await send(`/v1/entries/${id}`, { method: 'DELETE' })
+}
+
+export function getSession(): Promise<SessionInfo> {
+  return request('/v1/session')
+}
+
+export async function unlockSession(code: string): Promise<void> {
+  await send('/v1/session/unlock', json('POST', { code }))
+}
+
+export function getCalendarLink(): Promise<{ url: string }> {
+  return request('/v1/calendar')
 }
 
 export function getHealth(): Promise<HealthResponse> {

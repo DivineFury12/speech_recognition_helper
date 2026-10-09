@@ -110,3 +110,69 @@ def test_entry_has_no_null_updated_at(client):
     body = client.post("/v1/assistant/messages", json={"text": "Добавь задачу купить хлеб", "timezone": TZ}).json()
     assert "updated_at" not in body["entries"][0]
     assert "duration_minutes" in body["entries"][0]
+
+
+def _new_client():
+    from fastapi.testclient import TestClient
+
+    import app as app_module
+
+    return TestClient(app_module.app, headers={"X-Requested-With": "assistant"})
+
+
+def test_two_browsers_have_separate_data(client):
+    client.post("/v1/assistant/messages", json={"text": "Добавь задачу моя тайна", "timezone": TZ})
+    other = _new_client()
+    assert other.get("/v1/entries/undated").json()["items"] == []
+    mine = client.get("/v1/entries/undated").json()["items"]
+    assert [e["title"] for e in mine] == ["Моя тайна"]
+    assert other.get(f"/v1/entries/{mine[0]['id']}").status_code == 404
+
+
+def test_session_cookie_is_httponly(client):
+    r = client.get("/v1/session")
+    assert r.json()["unlocked"] is True
+    cookie = r.headers.get("set-cookie", "")
+    assert "HttpOnly" in cookie and "SameSite=lax" in cookie.replace("Lax", "lax")
+
+
+def test_csrf_header_required_with_cookie(client):
+    client.get("/v1/session")
+    r = client.post("/v1/assistant/messages", json={"text": "привет", "timezone": TZ},
+                    headers={"X-Requested-With": ""})
+    assert r.status_code == 403
+
+
+def test_access_code_gate(client):
+    sessions = client.app.state.sessions
+    sessions.access_code = "секрет-123"
+    try:
+        assert client.get("/v1/entries/undated").status_code == 401
+        assert client.get("/v1/session").json()["unlocked"] is False
+        assert client.post("/v1/session/unlock", json={"code": "нет"}).status_code == 401
+        assert client.post("/v1/session/unlock", json={"code": "секрет-123"}).status_code == 204
+        assert client.get("/v1/entries/undated").status_code == 200
+        assert client.get("/health").status_code == 200
+    finally:
+        sessions.access_code = ""
+
+
+def test_calendar_feed(client):
+    client.post("/v1/assistant/messages", json={"text": "Планёрка каждый понедельник в 10", "timezone": TZ})
+    url = client.get("/v1/calendar").json()["url"]
+    path = url.split("://", 1)[1].split("/", 1)[1]
+    r = _new_client().get("/" + path)
+    assert r.status_code == 200 and r.headers["content-type"].startswith("text/calendar")
+    assert "BEGIN:VEVENT" in r.text and "RRULE:FREQ=WEEKLY" in r.text and "Планёрка" in r.text
+    assert client.get("/v1/calendar/feed/" + "x.y" + ".ics").status_code == 404
+
+
+def test_patch_recurrence_and_validation(client):
+    e = client.post("/v1/entries", json={"kind": "task", "title": "Полить цветы", "date": "2026-10-10",
+                                         "timezone": TZ}).json()
+    r = client.patch(f"/v1/entries/{e['id']}", json={"recurrence": "weekly"})
+    assert r.status_code == 200 and r.json()["recurrence"] == "weekly"
+    m = client.post("/v1/entries", json={"kind": "meeting", "title": "Созвон", "date": "2026-10-10",
+                                         "time": "10:00", "timezone": TZ}).json()
+    assert m["duration_minutes"] == 60
+    assert client.patch(f"/v1/entries/{m['id']}", json={"time": None}).status_code == 422

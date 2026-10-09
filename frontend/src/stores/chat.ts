@@ -2,6 +2,7 @@ import { defineStore } from 'pinia'
 import { ref, watch } from 'vue'
 import { sendAudioMessage, sendTextMessage } from '@/api/client'
 import type { AssistantTurn, Entry } from '@/api/types'
+import { speak } from '@/composables/useSpeech'
 import { timezone } from '@/utils/time'
 import { useEntriesStore } from './entries'
 
@@ -15,12 +16,13 @@ export interface ChatMessage {
   voice?: boolean
 }
 
-const STORAGE_KEY = 'assistant-chat-v1'
+const STORAGE_KEY = 'assistant-chat-v2'
 const MAX_STORED = 100
 
 interface Persisted {
   messages: ChatMessage[]
   conversationId: string | null
+  awaiting: boolean
 }
 
 function load(): Persisted {
@@ -28,10 +30,16 @@ function load(): Persisted {
     const raw = sessionStorage.getItem(STORAGE_KEY)
     if (raw) {
       const p = JSON.parse(raw) as Persisted
-      if (Array.isArray(p.messages)) return { messages: p.messages.map((m) => ({ ...m, pending: false })), conversationId: p.conversationId ?? null }
+      if (Array.isArray(p.messages)) {
+        return {
+          messages: p.messages.map((m) => ({ ...m, pending: false })),
+          conversationId: p.conversationId ?? null,
+          awaiting: !!p.awaiting,
+        }
+      }
     }
   } catch {}
-  return { messages: [], conversationId: null }
+  return { messages: [], conversationId: null, awaiting: false }
 }
 
 let seq = 0
@@ -42,13 +50,18 @@ export const useChatStore = defineStore('chat', () => {
   const messages = ref<ChatMessage[]>(initial.messages)
   const sending = ref(false)
   const conversationId = ref<string | null>(initial.conversationId)
+  const awaiting = ref(initial.awaiting)
   const retryLast = ref<(() => void) | null>(null)
 
   watch(
-    [messages, conversationId],
+    [messages, conversationId, awaiting],
     () => {
       try {
-        const data: Persisted = { messages: messages.value.slice(-MAX_STORED), conversationId: conversationId.value }
+        const data: Persisted = {
+          messages: messages.value.slice(-MAX_STORED),
+          conversationId: conversationId.value,
+          awaiting: awaiting.value,
+        }
         sessionStorage.setItem(STORAGE_KEY, JSON.stringify(data))
       } catch {}
     },
@@ -72,7 +85,9 @@ export const useChatStore = defineStore('chat', () => {
         else if (m.voice) m.text = 'Речь не распознана'
         m.pending = false
       }
-      conversationId.value = turn.status === 'needs_clarification' ? turn.conversation_id : null
+      conversationId.value = turn.conversation_id
+      awaiting.value = turn.status === 'needs_clarification'
+      speak(turn.assistant_text)
       messages.value.push({
         id: turn.turn_id,
         role: 'assistant',
@@ -118,8 +133,9 @@ export const useChatStore = defineStore('chat', () => {
   function reset() {
     messages.value = []
     conversationId.value = null
+    awaiting.value = false
     retryLast.value = null
   }
 
-  return { messages, sending, conversationId, retryLast, sendText, sendAudio, retry, reset }
+  return { messages, sending, conversationId, awaiting, retryLast, sendText, sendAudio, retry, reset }
 })

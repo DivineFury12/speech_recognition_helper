@@ -1,5 +1,5 @@
 import { delay, http, HttpResponse } from 'msw'
-import type { AssistantTurn, Entry, EntryList, ErrorResponse, HealthResponse, Schemas } from '@/api/types'
+import type { AssistantTurn, Entry, EntryList, EntryUpdate, ErrorResponse, HealthResponse, Schemas, SessionInfo } from '@/api/types'
 import { addDays, isoDate } from '@/utils/time'
 
 const API = (import.meta.env.VITE_API_URL ?? '').replace(/\/+$/, '')
@@ -26,6 +26,7 @@ function mkEntry(kind: Kind, title: string, date: string | null, time: string | 
     time,
     timezone: tz,
     duration_minutes: kind === 'meeting' ? (duration ?? 60) : null,
+    recurrence: null,
     status: 'pending',
     created_at: new Date().toISOString(),
   }
@@ -168,5 +169,33 @@ export const handlers = [
       (e) => e.date && e.date >= from && e.date <= to && (!kind || e.kind === kind) && (!status || e.status === status),
     )
     return HttpResponse.json<EntryList>({ items })
+  }),
+
+  http.get(`${API}/v1/session`, () =>
+    HttpResponse.json<SessionInfo>({
+      user_id: '00000000-0000-4000-8000-000000000000',
+      access_code_required: false,
+      unlocked: true,
+      llm_provider: 'mock',
+      asr_enabled: true,
+    }),
+  ),
+
+  http.get(`${API}/v1/entries/undated`, () => HttpResponse.json<EntryList>({ items: entries.filter((e) => !e.date) })),
+
+  http.get(`${API}/v1/calendar`, () => HttpResponse.json({ url: `${location.origin}/v1/calendar/feed/mock.ics` })),
+
+  http.patch<{ id: string }, EntryUpdate, Entry | ErrorResponse>(`${API}/v1/entries/:id`, async ({ params, request }) => {
+    const entry = entries.find((e) => e.id === params.id)
+    if (!entry) return err(404, 'Запись не найдена')
+    Object.assign(entry, await request.json(), { updated_at: new Date().toISOString() })
+    return HttpResponse.json<Entry>(entry)
+  }),
+
+  http.delete<{ id: string }>(`${API}/v1/entries/:id`, ({ params }) => {
+    const i = entries.findIndex((e) => e.id === params.id)
+    if (i === -1) return err(404, 'Запись не найдена')
+    entries.splice(i, 1)
+    return new HttpResponse(null, { status: 204 })
   }),
 ]

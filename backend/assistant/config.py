@@ -52,6 +52,14 @@ class Settings:
     gigachat_ca_bundle: str = field(default_factory=_ca_bundle)
     gigachat_timeout: float = field(default_factory=lambda: float(os.getenv("GIGACHAT_TIMEOUT", "30")))
 
+    access_code: str = field(default_factory=lambda: os.getenv("ACCESS_CODE", ""))
+    session_secret: str = field(default_factory=lambda: os.getenv("SESSION_SECRET", ""))
+    cookie_secure: bool = field(default_factory=lambda: _bool("COOKIE_SECURE", False))
+    rate_limit_per_minute: int = field(default_factory=lambda: int(os.getenv("RATE_LIMIT_PER_MINUTE", "30")))
+    frontend_dist: str = field(
+        default_factory=lambda: os.getenv("FRONTEND_DIST", str(BACKEND_DIR.parent / "frontend" / "dist"))
+    )
+
     @property
     def resolved_llm_provider(self) -> str:
         if self.llm_provider:

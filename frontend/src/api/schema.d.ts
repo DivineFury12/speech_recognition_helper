@@ -4,6 +4,97 @@
  */
 
 export interface paths {
+    "/v1/session": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Узнать текущую сессию и нужен ли код доступа */
+        get: operations["getSession"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/session/unlock": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Ввести код доступа (если на сервере задан ACCESS_CODE) */
+        post: operations["unlockSession"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/entries/undated": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Получить задачи без срока */
+        get: operations["listUndatedEntries"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/calendar": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Получить ссылку на календарь в формате iCalendar
+         * @description Ссылку можно добавить в Google, Apple или Outlook Calendar как подписку.
+         */
+        get: operations["getCalendarLink"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/calendar/feed/{token}.ics": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Календарь пользователя (iCalendar)
+         * @description Доступ по токену из ссылки, кука не нужна.
+         */
+        get: operations["getCalendarFeed"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/health": {
         parameters: {
             query?: never;
@@ -199,7 +290,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Озвучить текст ответа ассистента */
+        /**
+         * Озвучить текст ответа ассистента
+         * @description Не реализовано на сервере (501); фронтенд озвучивает ответы через Web Speech API браузера.
+         */
         post: operations["synthesizeSpeech"];
         delete?: never;
         options?: never;
@@ -279,7 +373,7 @@ export interface components {
             /** @enum {string} */
             status: "completed" | "needs_clarification" | "no_action";
             /** @enum {string} */
-            intent: "create_entry" | "list_entries" | "search_entries" | "unknown";
+            intent: "create_entry" | "list_entries" | "search_entries" | "update_entry" | "delete_entry" | "complete_entry" | "unknown";
             /** @description Созданные или найденные записи; пустой список при уточнении. */
             entries: components["schemas"]["Entry"][];
         };
@@ -296,6 +390,20 @@ export interface components {
         EntryKind: "task" | "reminder" | "meeting";
         /** @enum {string} */
         EntryStatus: "pending" | "completed" | "cancelled";
+        /**
+         * @description Повтор записи; null — разовая.
+         * @enum {string|null}
+         */
+        Recurrence: "daily" | "weekdays" | "weekly" | "monthly" | null;
+        SessionInfo: {
+            /** Format: uuid */
+            user_id: string;
+            access_code_required: boolean;
+            unlocked: boolean;
+            /** @example gigachat */
+            llm_provider: string;
+            asr_enabled: boolean;
+        };
         /** @description Статус выполнения и дата изменения не обязательны для MVP. */
         Entry: {
             /** Format: uuid */
@@ -314,6 +422,7 @@ export interface components {
             timezone: string;
             /** @description Длительность встречи; для остальных типов null. */
             duration_minutes?: number | null;
+            recurrence?: components["schemas"]["Recurrence"];
             status?: components["schemas"]["EntryStatus"];
             /**
              * Format: date-time
@@ -335,6 +444,7 @@ export interface components {
             /** @example Europe/Moscow */
             timezone: string;
             duration_minutes?: number | null;
+            recurrence?: components["schemas"]["Recurrence"];
         };
         EntryUpdate: {
             title?: string;
@@ -343,6 +453,7 @@ export interface components {
             time?: string | null;
             timezone?: string;
             duration_minutes?: number | null;
+            recurrence?: components["schemas"]["Recurrence"];
             status?: components["schemas"]["EntryStatus"];
         };
         EntryList: {
@@ -377,6 +488,24 @@ export interface components {
                 "application/json": components["schemas"]["ErrorResponse"];
             };
         };
+        /** @description Нужен или неверен код доступа */
+        Unauthorized: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["ErrorResponse"];
+            };
+        };
+        /** @description Превышен лимит запросов */
+        TooManyRequests: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["ErrorResponse"];
+            };
+        };
         /** @description Не удалось выполнить операцию */
         InternalError: {
             headers: {
@@ -397,6 +526,117 @@ export interface components {
 }
 export type $defs = Record<string, never>;
 export interface operations {
+    getSession: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Сессия браузера */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SessionInfo"];
+                };
+            };
+        };
+    };
+    unlockSession: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    code: string;
+                };
+            };
+        };
+        responses: {
+            /** @description Код принят, кука обновлена */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: components["responses"]["Unauthorized"];
+            429: components["responses"]["TooManyRequests"];
+        };
+    };
+    listUndatedEntries: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Записи без даты, невыполненные первыми */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EntryList"];
+                };
+            };
+        };
+    };
+    getCalendarLink: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Персональная ссылка */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        url: string;
+                    };
+                };
+            };
+        };
+    };
+    getCalendarFeed: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                token: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Файл iCalendar */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/calendar": string;
+                };
+            };
+            404: components["responses"]["NotFound"];
+        };
+    };
     getHealth: {
         parameters: {
             query?: never;

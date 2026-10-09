@@ -1,10 +1,10 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
-import { listEntries } from '@/api/client'
-import type { Entry } from '@/api/types'
+import { deleteEntry, listEntries, listUndatedEntries, updateEntry } from '@/api/client'
+import type { Entry, EntryUpdate } from '@/api/types'
 import { addDays, isoDate } from '@/utils/time'
 
-export type Period = 'today' | 'week'
+export type Period = 'today' | 'week' | 'undated'
 
 export const useEntriesStore = defineStore('entries', () => {
   const period = ref<Period>('today')
@@ -14,15 +14,20 @@ export const useEntriesStore = defineStore('entries', () => {
   let reqId = 0
 
   async function refresh() {
-    const now = new Date()
-    const date_from = isoDate(now)
-    const date_to = period.value === 'today' ? date_from : isoDate(addDays(now, 6))
     const id = ++reqId
     loading.value = true
     error.value = null
     try {
-      const res = await listEntries({ date_from, date_to })
-      if (id === reqId) items.value = [...res.items].sort(compareEntries)
+      let res
+      if (period.value === 'undated') {
+        res = await listUndatedEntries()
+      } else {
+        const now = new Date()
+        const date_from = isoDate(now)
+        const date_to = period.value === 'today' ? date_from : isoDate(addDays(now, 6))
+        res = await listEntries({ date_from, date_to })
+      }
+      if (id === reqId) items.value = res.items
     } catch (e) {
       if (id === reqId) error.value = e instanceof Error ? e.message : 'Не удалось загрузить записи'
     } finally {
@@ -35,11 +40,21 @@ export const useEntriesStore = defineStore('entries', () => {
     return refresh()
   }
 
-  return { period, items, loading, error, refresh, setPeriod }
-})
+  async function act(run: () => Promise<unknown>) {
+    error.value = null
+    try {
+      await run()
+    } catch (e) {
+      error.value = e instanceof Error ? e.message : 'Не удалось сохранить'
+    } finally {
+      await refresh()
+    }
+  }
 
-function compareEntries(a: Entry, b: Entry): number {
-  const ka = `${a.date ?? '9999-99-99'} ${a.time ?? '99:99'}`
-  const kb = `${b.date ?? '9999-99-99'} ${b.time ?? '99:99'}`
-  return ka.localeCompare(kb)
-}
+  const toggleDone = (entry: Entry) =>
+    act(() => updateEntry(entry.id, { status: entry.status === 'completed' ? 'pending' : 'completed' }))
+  const save = (entry: Entry, changes: EntryUpdate) => act(() => updateEntry(entry.id, changes))
+  const remove = (entry: Entry) => act(() => deleteEntry(entry.id))
+
+  return { period, items, loading, error, refresh, setPeriod, toggleDone, save, remove }
+})

@@ -10,8 +10,10 @@ from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 
 from assistant.api import router as assistant_router
+from assistant.auth import RateLimiter, SessionMiddleware, Sessions, load_secret
 from assistant.config import get_settings
 from assistant.llm import LLMError, create_provider
 from assistant.service import Assistant
@@ -23,6 +25,7 @@ GIGAAM_CACHE = os.getenv(
     "GIGAAM_CACHE",
     "/cache/gigaam" if os.path.isdir("/cache") else os.path.join(os.path.dirname(os.path.abspath(__file__)), ".cache", "gigaam"),
 )
+MAX_UPLOAD_BYTES = 10 * 1024 * 1024
 ml = {}
 infer_lock = threading.Lock()
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"), format="%(levelname)s %(name)s: %(message)s")
@@ -84,7 +87,10 @@ async def lifespan(app: FastAPI):
         log.error("LLM недоступна, работаем на правилах: %s", e)
         llm = None
     log.info("LLM provider: %s", llm.name if llm else "rules")
+    if sessions.access_code:
+        log.info("Включён код доступа (ACCESS_CODE)")
     app.state.assistant = Assistant(storage, llm)
+    app.state.llm_name = llm.name if llm else "rules"
     app.state.transcribe_upload = transcribe_upload
     yield
     if llm is not None and hasattr(llm, "close"):
@@ -93,11 +99,20 @@ async def lifespan(app: FastAPI):
     ml.clear()
 
 
+sessions = Sessions(load_secret(settings.session_secret, settings.db_path), settings.access_code)
+
 app = FastAPI(title="Голосовой ассистент для задач и встреч", lifespan=lifespan)
+app.state.sessions = sessions
+app.state.assistant_limiter = RateLimiter(settings.rate_limit_per_minute, 60)
+app.state.unlock_limiter = RateLimiter(10, 600)
+app.state.asr_ready = lambda: "model" in ml and FFMPEG is not None
+app.state.llm_name = "rules"
+app.add_middleware(SessionMiddleware, sessions=sessions, cookie_secure=settings.cookie_secure)
 if settings.cors_origins:
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.cors_origins,
+        allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
     )
@@ -142,9 +157,11 @@ def require_asr():
 
 def transcribe_upload(file: UploadFile) -> str:
     require_asr()
-    data = file.file.read()
+    data = file.file.read(MAX_UPLOAD_BYTES + 1)
     if not data:
         raise HTTPException(400, "Пустой аудиофайл")
+    if len(data) > MAX_UPLOAD_BYTES:
+        raise HTTPException(413, "Аудиофайл слишком большой")
     with tempfile.TemporaryDirectory() as tmp:
         wav = prepare(data, file.filename, tmp)
         try:
@@ -189,3 +206,7 @@ def transcribe_longform(file: UploadFile = File(...)):
             for s in result.segments
         ]
     }
+
+
+if os.path.isfile(os.path.join(settings.frontend_dist, "index.html")):
+    app.mount("/", StaticFiles(directory=settings.frontend_dist, html=True), name="frontend")

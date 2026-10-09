@@ -18,7 +18,8 @@ WEEKDAYS = {
     "понедельник": 0, "вторник": 1, "сред": 2, "четверг": 3,
     "пятниц": 4, "суббот": 5, "воскресень": 6,
 }
-WEEKDAY_RE = r"(понедельник|вторник|сред[ау]|четверг|пятниц[ау]|суббот[ау]|воскресенье)"
+WEEKDAY_RE = r"(понедельник[аеу]?|вторник[аеу]?|сред[аеуы]|четверг[аеу]?|пятниц[аеуы]|суббот[аеуы]|воскресень[еяю])"
+RECURRENCES = ("daily", "weekdays", "weekly", "monthly")
 
 NUMBER_WORDS = {
     "один": 1, "одну": 1, "одна": 1, "два": 2, "две": 2, "три": 3, "четыре": 4,
@@ -77,13 +78,19 @@ def find_date(text: str, today: date) -> Match | None:
          lambda m: _safe_date(int(m.group(1)), int(m.group(2)), int(m.group(3)))),
         (r"(?<!в )(?<!к )\b(\d{1,2})\.(\d{1,2})(?:\.(\d{2,4}))?\b(?!\s*(?:час|мин))", _dotted),
         (r"\b(\d{1,2})(?:-?го)?\s+" + MONTH_RE + r"(?:\s+(\d{4}))?", _day_month),
-        (r"\b(?:(?:в|во|на)\s+)?(?:(следующ\w*|эт[уио]\w*)\s+)?" + WEEKDAY_RE + r"\b", _weekday_rule),
+        (r"\b(?:до|к)\s+конц[ау]\s+(?:этой\s+)?недели\b",
+         lambda m: today + timedelta(days=6 - today.weekday())),
+        (r"\b(?:до|к)\s+конц[ау]\s+(?:этого\s+)?месяца\b", lambda m: _month_end(today)),
+        (r"\b(?:на|к)\s+выходны[хем]\b|\bв\s+выходные\b",
+         lambda m: today + timedelta(days=(5 - today.weekday()) % 7)),
+        (r"\b(\d{1,2})(?:-?(?:го|е))?\s+числ[оа]\b", _day_of_month),
+        (r"\b(?:(?:в|во|на|до|к|ко)\s+)?(?:(следующ\w*|эт[уио]\w*|кажд\w*)\s+)?" + WEEKDAY_RE + r"\b", _weekday_rule),
     ]
     for pattern, build in rules:
         m = re.search(pattern, t)
         if not m:
             continue
-        if build is _dotted or build is _day_month or build is _weekday_rule:
+        if build in (_dotted, _day_month, _weekday_rule, _day_of_month):
             value = build(m, today)
         else:
             value = build(m)
@@ -113,6 +120,20 @@ def _future(today: date, month: int, day: int) -> date | None:
     if candidate and candidate < today:
         candidate = _safe_date(today.year + 1, month, day)
     return candidate
+
+
+def _month_end(today: date) -> date:
+    first_next = date(today.year + (today.month == 12), today.month % 12 + 1, 1)
+    return first_next - timedelta(days=1)
+
+
+def _day_of_month(m: re.Match, today: date) -> date | None:
+    day = int(m.group(1))
+    candidate = _safe_date(today.year, today.month, day)
+    if candidate and candidate >= today:
+        return candidate
+    year, month = (today.year + 1, 1) if today.month == 12 else (today.year, today.month + 1)
+    return _safe_date(year, month, day)
 
 
 def _weekday_rule(m: re.Match, today: date) -> date:
@@ -248,3 +269,66 @@ def format_when(d: date | None, t: time | None, today: date) -> str:
     if t:
         parts.append(f"в {t.strftime('%H:%M')}")
     return " ".join(parts) if parts else "без срока"
+
+
+RECURRENCE_PATTERNS = [
+    (r"\bпо\s+будн(?:ям|ым\s+дням)\b|\bкажд\w*\s+будн\w*\s+день\b|\bв\s+будни\b", "weekdays"),
+    (r"\bкажд\w*\s+(?:день|утро|вечер)\b|\bежедневн\w*\b", "daily"),
+    (r"\bкажд\w*\s+(?:недел\w*|" + WEEKDAY_RE + r")|\bеженедельн\w*\b|\bпо\s+(?:понедельник|вторник|сред|четверг|пятниц|суббот|воскресень)\w*\b", "weekly"),
+    (r"\bкажд\w*\s+(?:месяц\w*|\d{1,2}(?:-?(?:го|е))?\s+числ\w*)|\bежемесячн\w*\b", "monthly"),
+]
+
+RECURRENCE_LABEL = {
+    "daily": "каждый день",
+    "weekdays": "по будням",
+    "weekly": "каждую неделю",
+    "monthly": "каждый месяц",
+}
+
+
+def find_recurrence(text: str) -> Match | None:
+    t = normalize(text)
+    for pattern, rule in RECURRENCE_PATTERNS:
+        m = re.search(pattern, t)
+        if m:
+            return Match(rule, m.span())
+    return None
+
+
+def _add_month(d: date, months: int) -> date | None:
+    month_index = d.month - 1 + months
+    return _safe_date(d.year + month_index // 12, month_index % 12 + 1, d.day)
+
+
+def occurrences(start: date, rule: str | None, frm: date, to: date) -> list[date]:
+    if not rule:
+        return [start] if frm <= start <= to else []
+    result: list[date] = []
+    if rule in ("daily", "weekdays"):
+        d = max(start, frm)
+        while d <= to:
+            if rule == "daily" or d.weekday() < 5:
+                result.append(d)
+            d += timedelta(days=1)
+    elif rule == "weekly":
+        d = start
+        if d < frm:
+            d += timedelta(weeks=(frm - d).days // 7)
+        while d <= to:
+            if d >= frm:
+                result.append(d)
+            d += timedelta(weeks=1)
+    elif rule == "monthly":
+        k = max(0, (frm.year - start.year) * 12 + frm.month - start.month - 1)
+        while True:
+            d = _add_month(start, k)
+            k += 1
+            if d is None:
+                if k > 2400:
+                    break
+                continue
+            if d > to:
+                break
+            if d >= frm:
+                result.append(d)
+    return result

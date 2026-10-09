@@ -10,7 +10,14 @@ const { period, items, loading, error } = storeToRefs(store)
 const tabs: { id: Period; label: string }[] = [
   { id: 'today', label: 'Сегодня' },
   { id: 'week', label: 'Неделя' },
+  { id: 'undated', label: 'Без срока' },
 ]
+
+const emptyText: Record<Period, string> = {
+  today: 'На сегодня записей нет',
+  week: 'На неделю записей нет',
+  undated: 'Задач без срока нет',
+}
 
 onMounted(() => store.refresh())
 </script>
@@ -37,9 +44,16 @@ onMounted(() => store.refresh())
     </div>
 
     <div v-if="error" class="banner error">{{ error }}</div>
-    <p v-else-if="!items.length && !loading" class="empty">Записей нет</p>
+    <p v-if="!items.length && !loading" class="empty">{{ emptyText[period] }}</p>
     <ul class="entry-list" :class="{ dim: loading }">
-      <EntryItem v-for="e in items" :key="e.id" :entry="e" />
+      <EntryItem
+        v-for="e in items"
+        :key="`${e.id}:${e.date ?? ''}`"
+        :entry="e"
+        @toggle="store.toggleDone"
+        @save="store.save"
+        @remove="store.remove"
+      />
     </ul>
   </aside>
 </template>

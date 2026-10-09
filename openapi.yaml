@@ -5,6 +5,10 @@ info:
   description: |
     Контракт прототипа для фронтенда. Ручки с x-implementation-status: implemented
     уже работают в ASR-сервисе; planned описывают следующий этап разработки.
+    x-requirement-level: core отмечает публичные ручки минимального сценария,
+    supporting — полезные технические и прямые ручки для фронтенда, additional —
+    дополнительный функционал. Действия списка и поиска обязательны внутри
+    ассистента, но отдельные URL для них документ не предписывает.
     Пока предполагается один пользователь без авторизации.
 servers:
   - url: http://localhost:8000
@@ -23,6 +27,7 @@ paths:
       operationId: getHealth
       summary: Проверить готовность модели и устройство
       x-implementation-status: implemented
+      x-requirement-level: supporting
       responses:
         '200':
           description: Модель загружена
@@ -37,6 +42,7 @@ paths:
       summary: Распознать аудио длиной до 25 секунд
       description: Возвращает только текст, без выполнения команды ассистента.
       x-implementation-status: implemented
+      x-requirement-level: supporting
       requestBody:
         required: true
         content:
@@ -64,6 +70,7 @@ paths:
       summary: Распознать длинное аудио по сегментам
       description: Для сегментации требуется HF_TOKEN и доступ к модели VAD.
       x-implementation-status: implemented
+      x-requirement-level: additional
       requestBody:
         required: true
         content:
@@ -96,6 +103,7 @@ paths:
         и возвращает ответ. Если не хватает данных, status = needs_clarification;
         следующий ответ пользователя отправляется с тем же conversation_id.
       x-implementation-status: planned
+      x-requirement-level: core
       requestBody:
         required: true
         content:
@@ -128,6 +136,7 @@ paths:
       summary: Отправить голосовой запрос ассистенту
       description: Распознаёт речь и выполняет ту же логику, что и текстовая ручка.
       x-implementation-status: planned
+      x-requirement-level: core
       requestBody:
         required: true
         content:
@@ -165,6 +174,7 @@ paths:
       operationId: listConversationMessages
       summary: Получить историю диалога
       x-implementation-status: planned
+      x-requirement-level: additional
       parameters:
         - $ref: '#/components/parameters/ConversationId'
       responses:
@@ -192,6 +202,7 @@ paths:
       summary: Получить задачи, напоминания и встречи за период
       description: Границы периода включительно, сравнение по локальной дате записи.
       x-implementation-status: planned
+      x-requirement-level: supporting
       parameters:
         - name: date_from
           in: query
@@ -230,6 +241,7 @@ paths:
         Используется формой фронтенда. Для встречи и напоминания обязательны date
         и time; для задачи они могут отсутствовать. Голосовой сценарий идёт через Assistant.
       x-implementation-status: planned
+      x-requirement-level: additional
       requestBody:
         required: true
         content:
@@ -249,9 +261,13 @@ paths:
     get:
       tags: [Entries]
       operationId: searchEntries
-      summary: Найти ранее созданные записи по смысловому запросу
-      description: Поиск может находить близкие формулировки без точного совпадения.
+      summary: Найти ранее созданные записи по запросу
+      description: |
+        Поиск старых записей обязателен и не должен требовать дословного
+        совпадения запроса с названием. Семантический поиск близких по смыслу
+        формулировок желателен как улучшение.
       x-implementation-status: planned
+      x-requirement-level: supporting
       parameters:
         - name: q
           in: query
@@ -279,6 +295,7 @@ paths:
       operationId: getEntry
       summary: Получить запись по идентификатору
       x-implementation-status: planned
+      x-requirement-level: additional
       parameters:
         - $ref: '#/components/parameters/EntryId'
       responses:
@@ -295,6 +312,7 @@ paths:
       operationId: updateEntry
       summary: Изменить запись или отметить задачу выполненной
       x-implementation-status: planned
+      x-requirement-level: additional
       parameters:
         - $ref: '#/components/parameters/EntryId'
       requestBody:
@@ -319,6 +337,7 @@ paths:
       operationId: deleteEntry
       summary: Удалить запись
       x-implementation-status: planned
+      x-requirement-level: additional
       parameters:
         - $ref: '#/components/parameters/EntryId'
       responses:
@@ -332,6 +351,7 @@ paths:
       operationId: synthesizeSpeech
       summary: Озвучить текст ответа ассистента
       x-implementation-status: planned
+      x-requirement-level: additional
       requestBody:
         required: true
         content:
@@ -520,7 +540,8 @@ components:
       enum: [pending, completed, cancelled]
     Entry:
       type: object
-      required: [id, kind, title, date, time, timezone, status, created_at, updated_at]
+      description: Статус выполнения и дата изменения не обязательны для MVP.
+      required: [id, kind, title, date, time, timezone, created_at]
       properties:
         id:
           type: string
@@ -557,7 +578,7 @@ components:
         updated_at:
           type: string
           format: date-time
-          description: Момент последнего изменения в UTC.
+          description: Необязательный момент последнего изменения в UTC.
     EntryCreate:
       type: object
       required: [kind, title, timezone]

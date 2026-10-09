@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted } from 'vue'
+import { onBeforeUnmount, onMounted } from 'vue'
 import { storeToRefs } from 'pinia'
 import { useEntriesStore, type Period } from '@/stores/entries'
 import EntryItem from './EntryItem.vue'
@@ -19,7 +19,16 @@ const emptyText: Record<Period, string> = {
   undated: 'Задач без срока нет',
 }
 
-onMounted(() => store.refresh())
+const REFRESH_MS = 60_000
+let timer: number | undefined
+
+onMounted(() => {
+  void store.refresh()
+  timer = window.setInterval(() => {
+    if (document.visibilityState === 'visible') void store.refresh(true)
+  }, REFRESH_MS)
+})
+onBeforeUnmount(() => window.clearInterval(timer))
 </script>
 
 <template>
@@ -38,9 +47,7 @@ onMounted(() => store.refresh())
           {{ t.label }}
         </button>
       </div>
-      <button type="button" class="link" :disabled="loading" @click="store.refresh()">
-        {{ loading ? 'Загрузка…' : 'Обновить' }}
-      </button>
+      <span v-if="loading" class="spinner small" aria-label="Обновляю" />
     </div>
 
     <div v-if="error" class="banner error">{{ error }}</div>

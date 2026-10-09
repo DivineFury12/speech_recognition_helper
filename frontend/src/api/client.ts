@@ -117,6 +117,12 @@ export function getCalendarLink(): Promise<{ url: string }> {
   return request('/v1/calendar')
 }
 
+export async function downloadCalendar(): Promise<Blob> {
+  const { url } = await getCalendarLink()
+  const res = await send(new URL(url).pathname)
+  return res.blob()
+}
+
 export function getHealth(): Promise<HealthResponse> {
   return request('/health', {}, 5_000)
 }

@@ -27,7 +27,7 @@ async function submit() {
         placeholder="Код доступа"
         autofocus
       />
-      <button type="submit" class="send" :disabled="unlocking || !code.trim()">
+      <button type="submit" class="primary-btn" :disabled="unlocking || !code.trim()">
         {{ unlocking ? 'Проверяю…' : 'Войти' }}
       </button>
     </form>

@@ -105,7 +105,7 @@ export const useChatStore = defineStore('chat', () => {
       retryLast.value = retry
     } finally {
       sending.value = false
-      void useEntriesStore().refresh()
+      void useEntriesStore().refresh(true)
     }
   }
 

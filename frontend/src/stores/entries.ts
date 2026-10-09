@@ -13,9 +13,9 @@ export const useEntriesStore = defineStore('entries', () => {
   const error = ref<string | null>(null)
   let reqId = 0
 
-  async function refresh() {
+  async function refresh(silent = false) {
     const id = ++reqId
-    loading.value = true
+    if (!silent) loading.value = true
     error.value = null
     try {
       let res
@@ -47,7 +47,7 @@ export const useEntriesStore = defineStore('entries', () => {
     } catch (e) {
       error.value = e instanceof Error ? e.message : 'Не удалось сохранить'
     } finally {
-      await refresh()
+      await refresh(true)
     }
   }
 

@@ -9,6 +9,10 @@ info:
     supporting — полезные технические и прямые ручки для фронтенда, additional —
     дополнительный функционал. Действия списка и поиска обязательны внутри
     ассистента, но отдельные URL для них документ не предписывает.
+    Для фронтенда основной голосовой маршрут — POST /v1/assistant/audio:
+    один запрос с аудиофайлом, распознавание и обработка команды на сервере.
+    Текстовый маршрут — POST /v1/assistant/messages. Оба возвращают AssistantTurn.
+    POST /transcribe только возвращает текст и не выполняет команду.
     Пока предполагается один пользователь без авторизации.
 servers:
   - url: http://localhost:8000
@@ -40,7 +44,7 @@ paths:
       tags: [Speech recognition]
       operationId: transcribeShortAudio
       summary: Распознать аудио длиной до 25 секунд
-      description: Возвращает только текст, без выполнения команды ассистента.
+      description: Вспомогательная ручка для проверки распознавания или предварительного показа транскрипта; не выполняет команду ассистента.
       x-implementation-status: implemented
       x-requirement-level: supporting
       requestBody:
@@ -99,9 +103,10 @@ paths:
       operationId: sendTextMessage
       summary: Отправить текстовый запрос ассистенту
       description: |
-        Ассистент определяет намерение, при необходимости сохраняет или ищет записи
-        и возвращает ответ. Если не хватает данных, status = needs_clarification;
-        следующий ответ пользователя отправляется с тем же conversation_id.
+        Основной маршрут текстовой кнопки. Ассистент определяет намерение,
+        при необходимости сохраняет или ищет записи и возвращает ответ.
+        Если не хватает данных, status = needs_clarification; следующий ответ
+        пользователя отправляется с тем же conversation_id.
       x-implementation-status: planned
       x-requirement-level: core
       requestBody:
@@ -134,7 +139,11 @@ paths:
       tags: [Assistant]
       operationId: sendAudioMessage
       summary: Отправить голосовой запрос ассистенту
-      description: Распознаёт речь и выполняет ту же логику, что и текстовая ручка.
+      description: |
+        Основной маршрут голосовой кнопки: фронтенд отправляет файл и часовой пояс
+        одним multipart-запросом. Сервер распознаёт речь, передаёт полученный текст
+        в ту же логику ассистента, что использует POST /v1/assistant/messages,
+        и возвращает AssistantTurn с распознанным текстом в user_text.
       x-implementation-status: planned
       x-requirement-level: core
       requestBody:

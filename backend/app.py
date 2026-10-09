@@ -1,5 +1,6 @@
 import logging
 import os
+import shutil
 import subprocess
 import tempfile
 import threading
@@ -27,6 +28,23 @@ infer_lock = threading.Lock()
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"), format="%(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("app")
 settings = get_settings()
+
+
+def find_ffmpeg() -> str | None:
+    candidates = [os.getenv("FFMPEG_BINARY"), shutil.which("ffmpeg")]
+    local = os.getenv("LOCALAPPDATA")
+    if local:
+        candidates.append(os.path.join(local, "Microsoft", "WinGet", "Links", "ffmpeg.exe"))
+    for path in candidates:
+        if path and os.path.isfile(path):
+            folder = os.path.dirname(os.path.abspath(path))
+            if folder not in os.environ.get("PATH", "").split(os.pathsep):
+                os.environ["PATH"] = folder + os.pathsep + os.environ.get("PATH", "")
+            return path
+    return None
+
+
+FFMPEG = find_ffmpeg()
 
 
 def load_asr():
@@ -57,6 +75,8 @@ async def lifespan(app: FastAPI):
             load_asr()
         except ImportError as e:
             log.error("GigaAM не установлен, распознавание речи отключено: %s", e)
+        if "model" in ml:
+            log.info("ffmpeg: %s", FFMPEG or "НЕ НАЙДЕН — голосовые запросы будут отвечать 503")
     storage = Storage(settings.db_path)
     try:
         llm = create_provider(settings)
@@ -95,8 +115,10 @@ async def validation_error(request: Request, exc: RequestValidationError):
 
 
 def to_wav16k(src: str, dst: str):
+    if FFMPEG is None:
+        raise HTTPException(503, "ffmpeg не найден: установите его или укажите путь в FFMPEG_BINARY")
     r = subprocess.run(
-        ["ffmpeg", "-y", "-i", src, "-ac", "1", "-ar", "16000", dst],
+        [FFMPEG, "-y", "-i", src, "-ac", "1", "-ar", "16000", dst],
         capture_output=True,
     )
     if r.returncode != 0:

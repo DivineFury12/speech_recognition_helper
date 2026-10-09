@@ -81,11 +81,11 @@ GigaChat с откатом на правила; подробности, пере
 | Переменная | По умолчанию | Что делает |
 | --- | --- | --- |
 | `LLM_PROVIDER` | авто | `gigachat`, `local` (Qwen из `ml.py`) или `rules` |
-| `GIGACHAT_CREDENTIALS` | — | ключ авторизации GigaChat |
+| `GIGACHAT_CREDENTIALS` | — | ключ авторизации GigaChat (можно назвать `GIGAKEY`); читается и из `backend/.env` |
 | `GIGACHAT_SCOPE` | `GIGACHAT_API_PERS` | scope ключа |
-| `GIGACHAT_MODEL` | `GigaChat` | модель GigaChat |
-| `GIGACHAT_VERIFY_SSL` / `GIGACHAT_CA_BUNDLE` | `true` / — | проверка сертификата НУЦ Минцифры |
-| `ASR_ENABLED` | `true` | `false` — не грузить GigaAM (голос отвечает 503) |
+| `GIGACHAT_MODEL` | `GigaChat-2` | модель GigaChat (Lite; `GigaChat` сервер не принимает) |
+| `GIGACHAT_VERIFY_SSL` / `GIGACHAT_CA_BUNDLE` | `true` / `certs/russian_trusted_ca.pem` | проверка сертификата НУЦ Минцифры |
+| `ASR_ENABLED` | `true` | `false` — не грузить GigaAM; если GigaAM не установлен, отключается сам (голос отвечает 503) |
 | `DB_PATH` | `data/assistant.db` | файл SQLite |
 | `CORS_ORIGINS` | — | список origin через запятую, если фронт на другом домене |
 

@@ -86,12 +86,12 @@ class Assistant:
         t = dates.parse_time(parsed.time_phrase)
         if rel:
             d, t = rel.value.date(), rel.value.time().replace(second=0, microsecond=0)
-        if d is None and parsed.date_iso:
+        if d is None and parsed.date_phrase and parsed.date_iso:
             try:
                 d = date.fromisoformat(parsed.date_iso)
             except ValueError:
                 pass
-        if t is None and parsed.time_hhmm:
+        if t is None and parsed.time_phrase and parsed.time_hhmm:
             try:
                 t = time.fromisoformat(parsed.time_hhmm)
             except ValueError:

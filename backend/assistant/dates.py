@@ -159,6 +159,14 @@ def find_time(text: str) -> Match | None:
     return None
 
 
+RELATIVE_TIME_RE = r"\bчерез\s+(?:(?:" + NUM + r"\s+)?(?:час|часа|часов|минут[уы]?)|полчаса)\b"
+
+
+def find_relative_time_span(text: str) -> Match | None:
+    m = re.search(RELATIVE_TIME_RE, normalize(text))
+    return Match(m.group(0), m.span()) if m else None
+
+
 def find_relative_datetime(text: str, now: datetime) -> Match | None:
     t = normalize(text)
     m = re.search(r"\bчерез\s+(?:" + NUM + r"\s+)?(час|часа|часов|минут[уы]?)\b", t)

@@ -18,6 +18,7 @@ RUN python -m pip install --break-system-packages -r requirements.txt \
 
 COPY app.py ml.py ./
 COPY assistant ./assistant
+COPY certs ./certs
 
 EXPOSE 8000
 CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000"]

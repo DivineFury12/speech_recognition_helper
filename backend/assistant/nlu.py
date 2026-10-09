@@ -77,8 +77,9 @@ def parse_rules(text: str, today: date) -> Parsed:
         return Parsed(intent="unknown")
 
     kind = "meeting" if MEETING_RE.search(t) else "reminder" if REMINDER_RE.search(t) else "task"
-    date_m = dates.find_date(t, today)
-    time_m = dates.find_time(t)
+    rel_m = dates.find_relative_time_span(t)
+    date_m = None if rel_m else dates.find_date(t, today)
+    time_m = rel_m or dates.find_time(t)
     dur_m = dates.find_duration(t)
 
     rest = original

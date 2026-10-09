@@ -131,14 +131,14 @@ def _tz_or_422(value: str) -> str:
 router = APIRouter(prefix="/v1")
 
 
-@router.post("/assistant/messages", response_model=AssistantTurn, tags=["Assistant"])
+@router.post("/assistant/messages", response_model=AssistantTurn, response_model_exclude_unset=True, tags=["Assistant"])
 def send_text_message(body: TextMessageRequest, request: Request):
     tz = _tz_or_422(body.timezone)
     cid = str(body.conversation_id) if body.conversation_id else None
     return _assistant(request).handle(body.text, tz, cid)
 
 
-@router.post("/assistant/audio", response_model=AssistantTurn, tags=["Assistant"])
+@router.post("/assistant/audio", response_model=AssistantTurn, response_model_exclude_unset=True, tags=["Assistant"])
 def send_audio_message(
     request: Request,
     file: UploadFile = File(...),
@@ -172,7 +172,7 @@ def list_conversation_messages(conversation_id: uuid.UUID, request: Request):
     return {"conversation_id": cid, "messages": storage.list_messages(cid)}
 
 
-@router.get("/entries", response_model=EntryList, tags=["Entries"])
+@router.get("/entries", response_model=EntryList, response_model_exclude_unset=True, tags=["Entries"])
 def list_entries(
     request: Request,
     date_from: Annotated[dt.date, Query()],
@@ -186,7 +186,7 @@ def list_entries(
     return {"items": items}
 
 
-@router.post("/entries", response_model=Entry, status_code=201, tags=["Entries"])
+@router.post("/entries", response_model=Entry, status_code=201, response_model_exclude_unset=True, tags=["Entries"])
 def create_entry(body: EntryCreate, request: Request):
     return _assistant(request).storage.create_entry(
         kind=body.kind,
@@ -198,7 +198,7 @@ def create_entry(body: EntryCreate, request: Request):
     )
 
 
-@router.get("/entries/search", response_model=EntryList, tags=["Entries"])
+@router.get("/entries/search", response_model=EntryList, response_model_exclude_unset=True, tags=["Entries"])
 def search_entries(request: Request, q: Annotated[str, Query(min_length=1)], kind: EntryKind | None = None):
     from .search import search_entries as rank
 
@@ -206,7 +206,7 @@ def search_entries(request: Request, q: Annotated[str, Query(min_length=1)], kin
     return {"items": rank(q, storage.all_entries(kind))}
 
 
-@router.get("/entries/{entry_id}", response_model=Entry, tags=["Entries"])
+@router.get("/entries/{entry_id}", response_model=Entry, response_model_exclude_unset=True, tags=["Entries"])
 def get_entry(entry_id: uuid.UUID, request: Request):
     entry = _assistant(request).storage.get_entry(str(entry_id))
     if entry is None:
@@ -214,7 +214,7 @@ def get_entry(entry_id: uuid.UUID, request: Request):
     return entry
 
 
-@router.patch("/entries/{entry_id}", response_model=Entry, tags=["Entries"])
+@router.patch("/entries/{entry_id}", response_model=Entry, response_model_exclude_unset=True, tags=["Entries"])
 def update_entry(entry_id: uuid.UUID, body: EntryUpdate, request: Request):
     changes = body.model_dump(exclude_unset=True)
     if not changes:

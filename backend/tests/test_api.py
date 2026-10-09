@@ -104,3 +104,9 @@ def test_tts_not_implemented(client):
 
 def test_unknown_conversation_404(client):
     assert client.get(f"/v1/conversations/{uuid.uuid4()}/messages").status_code == 404
+
+
+def test_entry_has_no_null_updated_at(client):
+    body = client.post("/v1/assistant/messages", json={"text": "Добавь задачу купить хлеб", "timezone": TZ}).json()
+    assert "updated_at" not in body["entries"][0]
+    assert "duration_minutes" in body["entries"][0]

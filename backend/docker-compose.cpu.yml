@@ -5,14 +5,16 @@ services:
       dockerfile: Dockerfile.cpu
     ports:
       - "8000:8000"
+    env_file:
+      - path: .env
+        required: false
     environment:
       - GIGAAM_MODEL=${GIGAAM_MODEL:-v3_e2e_rnnt}
       - GIGAAM_DEVICE=cpu
       - HF_TOKEN=${HF_TOKEN:-}
       - LLM_PROVIDER=${LLM_PROVIDER:-}
-      - GIGACHAT_CREDENTIALS=${GIGACHAT_CREDENTIALS:-}
       - GIGACHAT_SCOPE=${GIGACHAT_SCOPE:-GIGACHAT_API_PERS}
-      - GIGACHAT_MODEL=${GIGACHAT_MODEL:-GigaChat}
+      - GIGACHAT_MODEL=${GIGACHAT_MODEL:-GigaChat-2}
       - GIGACHAT_VERIFY_SSL=${GIGACHAT_VERIFY_SSL:-true}
       - CORS_ORIGINS=${CORS_ORIGINS:-}
     volumes:

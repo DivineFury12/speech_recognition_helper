@@ -20,6 +20,7 @@ MODEL_NAME = os.getenv("GIGAAM_MODEL", "v3_e2e_rnnt")
 DEVICE = os.getenv("GIGAAM_DEVICE", "auto").lower()
 ml = {}
 infer_lock = threading.Lock()
+logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"), format="%(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("app")
 settings = get_settings()
 
@@ -40,7 +41,7 @@ def load_asr():
         torch.ones(1, device="cuda").add_(1)
         torch.cuda.synchronize()
     ml["model"] = gigaam.load_model(
-        MODEL_NAME, device=device, download_root="/cache/gigaam"
+        MODEL_NAME, device=device, download_root=os.getenv("GIGAAM_CACHE", "/cache/gigaam")
     )
     ml["device"] = str(next(ml["model"].parameters()).device)
 
@@ -48,7 +49,10 @@ def load_asr():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     if settings.asr_enabled:
-        load_asr()
+        try:
+            load_asr()
+        except ImportError as e:
+            log.error("GigaAM не установлен, распознавание речи отключено: %s", e)
     storage = Storage(settings.db_path)
     try:
         llm = create_provider(settings)

@@ -177,3 +177,21 @@ def test_rules_intents():
     assert parse_rules("Найди встречу про бюджет", today).intent == "search_entries"
     assert parse_rules("Найди встречу про бюджет", today).query == "бюджет"
     assert parse_rules("Напомни, что у меня завтра в 10 врач", today).intent == "create_entry"
+
+
+def test_llm_date_guess_does_not_override_draft():
+    storage = Storage(":memory:")
+    first = Assistant(storage, None).handle("Поставь встречу с Иваном завтра", TZ, now=NOW)
+    reply = json.dumps({"intent": "create_entry", "kind": None, "title": None,
+                        "date_phrase": None, "time_phrase": "в 15:00",
+                        "date": "2026-10-09", "time": "15:00"})
+    second = Assistant(storage, FakeLLM(reply)).handle("В 15:00", TZ, first["conversation_id"], now=NOW)
+    entry = second["entries"][0]
+    assert (entry["date"], entry["time"]) == ("2026-10-10", "15:00")
+
+
+def test_rules_relative_time(assistant):
+    turn = say(assistant, "Напомни через 2 часа выключить духовку")
+    entry = turn["entries"][0]
+    assert entry["title"] == "Выключить духовку"
+    assert (entry["date"], entry["time"]) == ("2026-10-09", "14:00")

@@ -58,11 +58,19 @@ class Storage:
         self._db.row_factory = sqlite3.Row
         self._db.execute("PRAGMA foreign_keys = ON")
         self._db.executescript(SCHEMA)
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._draft_ttl = draft_ttl
 
     def close(self) -> None:
         self._db.close()
+
+    def _fetchone(self, sql: str, args: tuple | list = ()) -> sqlite3.Row | None:
+        with self._lock:
+            return self._db.execute(sql, args).fetchone()
+
+    def _fetchall(self, sql: str, args: tuple | list = ()) -> list[sqlite3.Row]:
+        with self._lock:
+            return self._db.execute(sql, args).fetchall()
 
     def _entry(self, row: sqlite3.Row | None) -> dict[str, Any] | None:
         if row is None:
@@ -84,7 +92,7 @@ class Storage:
         return self.get_entry(entry_id)
 
     def get_entry(self, entry_id: str) -> dict[str, Any] | None:
-        row = self._db.execute("SELECT * FROM entries WHERE id = ?", (entry_id,)).fetchone()
+        row = self._fetchone("SELECT * FROM entries WHERE id = ?", (entry_id,))
         return self._entry(row)
 
     def list_entries(self, date_from: str, date_to: str, kind: str | None = None,
@@ -98,7 +106,7 @@ class Storage:
             sql += " AND status = ?"
             args.append(status)
         sql += " ORDER BY date, time IS NULL, time, created_at"
-        return [self._entry(r) for r in self._db.execute(sql, args).fetchall()]
+        return [self._entry(r) for r in self._fetchall(sql, args)]
 
     def all_entries(self, kind: str | None = None) -> list[dict[str, Any]]:
         sql = "SELECT * FROM entries"
@@ -107,7 +115,7 @@ class Storage:
             sql += " WHERE kind = ?"
             args.append(kind)
         sql += " ORDER BY created_at DESC"
-        return [self._entry(r) for r in self._db.execute(sql, args).fetchall()]
+        return [self._entry(r) for r in self._fetchall(sql, args)]
 
     def update_entry(self, entry_id: str, changes: dict[str, Any]) -> dict[str, Any] | None:
         changes = {k: v for k, v in changes.items() if k in UPDATABLE_FIELDS}
@@ -136,7 +144,7 @@ class Storage:
         return conversation_id
 
     def conversation_exists(self, conversation_id: str) -> bool:
-        return self._db.execute("SELECT 1 FROM conversations WHERE id = ?", (conversation_id,)).fetchone() is not None
+        return self._fetchone("SELECT 1 FROM conversations WHERE id = ?", (conversation_id,)) is not None
 
     def add_message(self, conversation_id: str, role: str, text: str) -> str:
         message_id = str(uuid.uuid4())
@@ -148,16 +156,16 @@ class Storage:
         return message_id
 
     def list_messages(self, conversation_id: str) -> list[dict[str, Any]]:
-        rows = self._db.execute(
+        rows = self._fetchall(
             "SELECT id, role, text, created_at FROM messages WHERE conversation_id = ? ORDER BY created_at, rowid",
             (conversation_id,),
-        ).fetchall()
+        )
         return [dict(r) for r in rows]
 
     def get_draft(self, conversation_id: str) -> dict[str, Any] | None:
-        row = self._db.execute(
+        row = self._fetchone(
             "SELECT data, updated_at FROM drafts WHERE conversation_id = ?", (conversation_id,)
-        ).fetchone()
+        )
         if row is None:
             return None
         updated = datetime.fromisoformat(row["updated_at"].replace("Z", "+00:00"))

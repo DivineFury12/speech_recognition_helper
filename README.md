@@ -11,6 +11,8 @@
    ```
 
    Укажите в `backend/.env` свой `GIGACHAT_AUTH_KEY` и доступную вам модель `GIGACHAT_MODEL`.
+   Для поиска записей оставьте `EMBEDDING_MODEL=e5` (по умолчанию) или замените на
+   `EMBEDDING_MODEL=frida`. Это выбор модели эмбеддингов.
 
 2. Запустите бэкенд и PostgreSQL:
 
@@ -20,6 +22,10 @@
    ```
 
    Если GPU нет, используйте `docker compose -f docker-compose.cpu.yml up -d --build`. При первом запуске скачиваются веса моделей.
+   После смены `EMBEDDING_MODEL` повторите команду запуска. Чтобы старые записи
+   участвовали в смысловом поиске с новой моделью, выполните
+   `docker compose exec -T gigaam python -m src.reindex_embeddings`
+   (для CPU-варианта добавьте `-f docker-compose.cpu.yml` после `docker compose`).
 
 3. В другом терминале запустите фронтенд из корня проекта:
 

@@ -20,6 +20,8 @@ RUN python -m pip install --break-system-packages -r requirements.txt \
 
 COPY app.py .
 COPY src ./src
+COPY alembic.ini .
+COPY migrations ./migrations
 
 EXPOSE 8000
 CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000"]

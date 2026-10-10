@@ -43,6 +43,10 @@ class Entry(pydantic.BaseModel):
     updated_at: datetime.datetime | None = None
 
 
+class EntryList(pydantic.BaseModel):
+    items: list[Entry]
+
+
 class TextMessageRequest(pydantic.BaseModel):
     text: str = pydantic.Field(min_length=1)
     timezone: str = pydantic.Field(min_length=1)

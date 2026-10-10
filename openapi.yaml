@@ -4,9 +4,10 @@ info:
   version: 0.1.0
   description: |
     Контракт прототипа для фронтенда. Ручки с x-implementation-status: implemented
-    уже работают; partial доступны в API и при настроенном GigaChat извлекают
-    структуру команды, но пока не сохраняют и не ищут записи. Без ключа GigaChat
-    они отвечают 501; planned описывают следующий этап.
+    уже работают; partial доступны в API и при настроенном GigaChat выполняют
+    создание, список и поиск записей, но уточняющий диалог ещё не подключён.
+    Без ключа GigaChat маршруты ассистента отвечают 501; planned описывают
+    следующий этап.
     x-requirement-level: core отмечает публичные ручки минимального сценария,
     supporting — полезные технические и прямые ручки для фронтенда, additional —
     дополнительный функционал. Действия списка и поиска обязательны внутри
@@ -107,8 +108,8 @@ paths:
       description: |
         Основной маршрут текстовой кнопки. Ассистент определяет намерение,
         через GigaChat извлекает структурированную команду и возвращает ответ.
-        Сохранение, поиск и уточняющий диалог пока не подключены: ответ имеет
-        status = no_action даже при нехватке данных. После реализации диалога
+        При подключённой БД создание, список и поиск возвращают status = completed.
+        При нехватке данных ответ имеет status = no_action. После реализации диалога
         уточнения будут иметь status = needs_clarification, а следующий ответ
         пользователя будет отправляться с тем же conversation_id.
       x-implementation-status: partial
@@ -222,7 +223,7 @@ paths:
       operationId: listEntries
       summary: Получить задачи, напоминания и встречи за период
       description: Границы периода включительно, сравнение по локальной дате записи.
-      x-implementation-status: planned
+      x-implementation-status: implemented
       x-requirement-level: supporting
       parameters:
         - name: date_from
@@ -287,7 +288,7 @@ paths:
         Поиск старых записей обязателен и не должен требовать дословного
         совпадения запроса с названием. Семантический поиск близких по смыслу
         формулировок желателен как улучшение.
-      x-implementation-status: planned
+      x-implementation-status: implemented
       x-requirement-level: supporting
       parameters:
         - name: q
@@ -586,8 +587,8 @@ components:
         conversation_id: 550e8400-e29b-41d4-a716-446655440000
         turn_id: 4e8d4cb6-bf66-453c-a92b-71c578889103
         user_text: Поставь встречу с Иваном завтра в 15:00
-        assistant_text: Команда распознана, но запись и поиск пока не подключены. Действие не выполнено.
-        status: no_action
+        assistant_text: 'Сохранено: Встреча с Иваном.'
+        status: completed
         intent: create_entry
         entries: []
     ConversationMessage:

@@ -7,11 +7,16 @@ import fastapi.responses
 import src.adapters.transcriber
 import src.adapters.ffmeg
 import src.adapters.gigachat
+import src.adapters.local_embeddings
+import src.adapters.entry_repository
 import src.api.assistant.router
+import src.api.entries.router
 import src.api.transcribe.router
+import src.db
 import src.errors
 import src.services.assistant
 import src.services.command_extractor
+import src.services.entries
 import src.services.transcriber
 import src.settings
 
@@ -46,6 +51,7 @@ def create_app(settings: src.settings.Settings | None = None) -> fastapi.FastAPI
         }
 
         gigachat_client = None
+        engine = None
         if config.gigachat_auth_key:
             gigachat_client = src.adapters.gigachat.GigaChatClient(
                 auth_key=config.gigachat_auth_key,
@@ -53,8 +59,21 @@ def create_app(settings: src.settings.Settings | None = None) -> fastapi.FastAPI
                 model=config.gigachat_model,
                 ca_bundle=config.gigachat_ca_bundle,
             )
+
+        if config.database_url is not None:
+            sessions, engine = src.db.create_session_factory(config.database_url)
+            app.state.entries_service = src.services.entries.EntryService(
+                src.adapters.entry_repository.SqlAlchemyEntryRepository(sessions),
+                src.adapters.local_embeddings.create_embedding_model(
+                    name=config.embedding_model_name,
+                    cache_dir=str(config.cache_dir.parent / 'embeddings'),
+                ),
+            )
+
+        if gigachat_client is not None:
             app.state.assistant_service = src.services.assistant.AssistantService(
-                src.services.command_extractor.ExternalCommandExtractor(gigachat_client)
+                src.services.command_extractor.ExternalCommandExtractor(gigachat_client),
+                app.state.entries_service,
             )
 
         try:
@@ -62,16 +81,21 @@ def create_app(settings: src.settings.Settings | None = None) -> fastapi.FastAPI
         finally:
             app.state.transcription_service = None
             app.state.assistant_service = None
+            app.state.entries_service = None
             if gigachat_client is not None:
                 gigachat_client.close()
+            if engine is not None:
+                engine.dispose()
 
     app = fastapi.FastAPI(
         title='GigaAM-v3 ASR',
         lifespan=lifespan,
     )
     app.state.assistant_service = None
+    app.state.entries_service = None
     app.include_router(src.api.transcribe.router.router)
     app.include_router(src.api.assistant.router.router)
+    app.include_router(src.api.entries.router.router)
 
     @app.exception_handler(src.errors.AudioConversionError)
     async def handle_conversion_error(

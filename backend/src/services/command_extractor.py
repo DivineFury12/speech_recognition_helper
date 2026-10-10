@@ -15,7 +15,7 @@ action: create_entry, list_entries, search_entries или unknown.
 для search_entries — query. Не выдумывай отсутствующие данные: используй null.
 Преобразуй относительные даты по today и timezone из сообщения пользователя.
 Дата имеет формат YYYY-MM-DD, время — HH:MM в локальном часовом поясе.
-Не выполняй действия и не утверждай, что запись сохранена."""
+Только извлекай поля; действие выполняет сервер."""
 
 
 class InvalidModelResponseError(Exception):

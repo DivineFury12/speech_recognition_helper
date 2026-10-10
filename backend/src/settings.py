@@ -2,6 +2,10 @@ import dataclasses
 import os
 import pathlib
 
+from sqlalchemy.engine import URL
+
+from src.db_config import get_database_url
+
 
 @dataclasses.dataclass(frozen=True)
 class Settings:
@@ -13,6 +17,8 @@ class Settings:
     gigachat_scope: str
     gigachat_model: str
     gigachat_ca_bundle: str | None
+    database_url: URL | None = dataclasses.field(default=None, repr=False)
+    embedding_model_name: str = 'intfloat/multilingual-e5-small'
 
     @classmethod
     def from_env(cls) -> 'Settings':
@@ -33,4 +39,6 @@ class Settings:
             gigachat_scope=os.getenv('GIGACHAT_SCOPE', 'GIGACHAT_API_PERS'),
             gigachat_model=os.getenv('GIGACHAT_MODEL', 'GigaChat-2'),
             gigachat_ca_bundle=os.getenv('GIGACHAT_CA_BUNDLE', '').strip() or None,
+            database_url=get_database_url(),
+            embedding_model_name=os.getenv('EMBEDDING_MODEL', 'intfloat/multilingual-e5-small'),
         )

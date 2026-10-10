@@ -1,5 +1,8 @@
 __pycache__
 *.pyc
 .git
+.env
+.env.*
+!.env.example
 *.wav
 *.mp3

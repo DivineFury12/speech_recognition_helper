@@ -9,6 +9,10 @@ services:
       - GIGAAM_MODEL=${GIGAAM_MODEL:-v3_e2e_rnnt}
       - GIGAAM_DEVICE=cpu
       - HF_TOKEN=${HF_TOKEN:-}
+      - GIGACHAT_AUTH_KEY=${GIGACHAT_AUTH_KEY:-}
+      - GIGACHAT_SCOPE=${GIGACHAT_SCOPE:-GIGACHAT_API_PERS}
+      - GIGACHAT_MODEL=${GIGACHAT_MODEL:-GigaChat-2}
+      - GIGACHAT_CA_BUNDLE=${GIGACHAT_CA_BUNDLE:-/etc/ssl/certs/ca-certificates.crt}
     volumes:
       - model-cache:/cache
     restart: unless-stopped

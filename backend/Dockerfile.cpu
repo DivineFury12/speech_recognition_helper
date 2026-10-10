@@ -6,8 +6,11 @@ ENV PYTHONUNBUFFERED=1 \
     XDG_CACHE_HOME=/cache
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        ffmpeg git \
+        ca-certificates ffmpeg git \
     && rm -rf /var/lib/apt/lists/*
+
+COPY certs/russian_trusted_root_ca_pem.crt /usr/local/share/ca-certificates/russian-trusted-root-ca.crt
+RUN update-ca-certificates
 
 WORKDIR /app
 

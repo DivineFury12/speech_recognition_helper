@@ -4,7 +4,8 @@ import uuid
 
 import pydantic
 
-from src.schemas.assistant import AssistantIntent, AssistantStatus
+from src.ports.conversations import ConversationState
+from src.schemas.assistant import AssistantIntent, AssistantStatus, ConversationMessage, Entry, EntryKind, EntryStatus
 from src.schemas.assistant_command import AssistantCommand
 from src.services.assistant import AssistantService, InvalidTimezoneError
 from src.services.command_extractor import ExternalCommandExtractor, InvalidModelResponseError
@@ -15,9 +16,53 @@ class FakeExtractor:
         self.command = command
         self.calls = []
 
-    def extract(self, text, timezone, today):
-        self.calls.append((text, timezone, today))
+    def extract(self, text, timezone, today, previous=None, history=None):
+        self.calls.append((text, timezone, today, previous, history))
+        if isinstance(self.command, list):
+            return self.command.pop(0)
         return self.command
+
+
+class FakeConversations:
+    def __init__(self):
+        self.states = {}
+
+    def get(self, conversation_id):
+        return self.states.get(conversation_id)
+
+    def save_turn(self, turn, pending_command):
+        previous = self.states.get(turn.conversation_id)
+        messages = list(previous.messages) if previous else []
+        for role, text in (('user', turn.user_text), ('assistant', turn.assistant_text)):
+            messages.append(ConversationMessage(
+                id=uuid.uuid4(), role=role, text=text,
+                created_at=datetime.datetime.now(datetime.timezone.utc),
+            ))
+        self.states[turn.conversation_id] = ConversationState(
+            id=turn.conversation_id, pending_command=pending_command, messages=messages,
+        )
+
+    def list_messages(self, conversation_id):
+        state = self.get(conversation_id)
+        return state.messages if state else None
+
+
+class FakeEntries:
+    def __init__(self):
+        self.created = []
+
+    def create(self, *, kind, title, date, time, timezone):
+        self.created.append((kind, title, date, time, timezone))
+        return Entry(
+            id=uuid.uuid4(), kind=kind, title=title, date=date, time=time,
+            timezone=timezone, status=EntryStatus.pending,
+            created_at=datetime.datetime.now(datetime.timezone.utc),
+        )
+
+    def create_once(self, *, kind, title, date, time, timezone):
+        return self.create(
+            kind=kind, title=title, date=date, time=time, timezone=timezone,
+        ), True
 
 
 class FakeModelClient:
@@ -41,6 +86,10 @@ class AssistantServiceTests(unittest.TestCase):
         })
         self.assertEqual(command.title, 'Встреча с Иваном')
         self.assertEqual(command.date, datetime.date(2026, 10, 12))
+        self.assertEqual(
+            set(AssistantCommand.provider_schema()['required']),
+            set(AssistantCommand.model_fields),
+        )
 
     def test_command_schema_rejects_invalid_result(self):
         for payload in (
@@ -80,6 +129,49 @@ class AssistantServiceTests(unittest.TestCase):
         self.assertIn('дату', turn.assistant_text)
         self.assertIn('время', turn.assistant_text)
 
+    def test_clarification_uses_saved_command_and_executes_once(self):
+        extractor = FakeExtractor([
+            AssistantCommand.model_validate({
+                'action': 'create_entry', 'kind': 'reminder',
+                'title': 'Сделать тренировку', 'date': '2026-10-16',
+            }),
+            AssistantCommand.model_validate({
+                'action': 'create_entry', 'time': '18:00', 'time_phrase': 'в 18:00',
+            }),
+        ])
+        entries = FakeEntries()
+        conversations = FakeConversations()
+        service = AssistantService(extractor, entries, conversations)
+
+        first = service.handle_message(
+            'В пятницу напомни сделать тренировку', 'Europe/Moscow', None,
+        )
+        self.assertEqual(first.status, AssistantStatus.needs_clarification)
+        self.assertEqual(entries.created, [])
+        self.assertIsNotNone(conversations.get(first.conversation_id).pending_command)
+
+        second = service.handle_message('В 18:00', 'Europe/Moscow', first.conversation_id)
+        self.assertEqual(second.status, AssistantStatus.completed)
+        self.assertEqual(len(entries.created), 1)
+        self.assertEqual(entries.created[0][3], '18:00')
+        self.assertIsNone(conversations.get(first.conversation_id).pending_command)
+        self.assertEqual(len(conversations.list_messages(first.conversation_id)), 4)
+        self.assertIsNotNone(extractor.calls[1][3])
+
+    def test_pending_command_can_be_cancelled(self):
+        extractor = FakeExtractor(AssistantCommand.model_validate({
+            'action': 'create_entry', 'kind': 'meeting', 'title': 'Встреча с Иваном',
+        }))
+        entries = FakeEntries()
+        conversations = FakeConversations()
+        service = AssistantService(extractor, entries, conversations)
+        first = service.handle_message('Создай встречу с Иваном', 'Europe/Moscow', None)
+        cancelled = service.handle_message('Отмена', 'Europe/Moscow', first.conversation_id)
+        self.assertEqual(cancelled.status, AssistantStatus.no_action)
+        self.assertEqual(len(extractor.calls), 1)
+        self.assertIsNone(conversations.get(first.conversation_id).pending_command)
+        self.assertEqual(entries.created, [])
+
     def test_service_rejects_unknown_timezone(self):
         extractor = FakeExtractor(AssistantCommand(action='unknown'))
         with self.assertRaises(InvalidTimezoneError):
@@ -97,6 +189,57 @@ class AssistantServiceTests(unittest.TestCase):
         self.assertIn('Создай задачу купить билеты', client.calls[0][1])
         self.assertIn('2026-10-10', client.calls[0][1])
         self.assertIn('properties', client.calls[0][2])
+
+    def test_model_date_uses_source_phrase_and_ignores_invented_time(self):
+        client = FakeModelClient({
+            'action': 'create_entry', 'kind': 'reminder',
+            'title': 'Сделать тренировку', 'date': '2026-10-13',
+            'date_phrase': 'в пятницу', 'time': '18:00', 'time_phrase': None,
+        })
+        command = ExternalCommandExtractor(client).extract(
+            'В пятницу напомни сделать тренировку',
+            'Europe/Moscow', datetime.date(2026, 10, 11),
+        )
+        self.assertEqual(command.date, datetime.date(2026, 10, 16))
+        self.assertIsNone(command.time)
+
+    def test_explicit_weekday_is_recognized_when_model_omits_date_phrase(self):
+        client = FakeModelClient({
+            'action': 'create_entry', 'kind': 'reminder',
+            'title': 'про тренировку', 'date': None, 'date_phrase': None,
+            'time': None, 'time_phrase': None,
+        })
+        command = ExternalCommandExtractor(client).extract(
+            'Напомни в пятницу про тренировку',
+            'Europe/Moscow', datetime.date(2026, 10, 11),
+        )
+        self.assertEqual(command.date, datetime.date(2026, 10, 16))
+        self.assertIsNone(command.time)
+
+    def test_model_cannot_invent_date_for_undated_task(self):
+        client = FakeModelClient({
+            'action': 'create_entry', 'kind': 'task', 'title': 'Разобраться с уроками',
+            'date': '2026-10-11', 'time': '18:00',
+        })
+        command = ExternalCommandExtractor(client).extract(
+            'Создай задачу разобраться с уроками',
+            'Europe/Moscow', datetime.date(2026, 10, 11),
+        )
+        self.assertIsNone(command.date)
+        self.assertIsNone(command.time)
+
+    def test_model_time_is_recomputed_from_user_phrase(self):
+        client = FakeModelClient({
+            'action': 'create_entry', 'kind': 'meeting', 'title': 'Встреча с Иваном',
+            'date': '2026-10-12', 'date_phrase': 'завтра',
+            'time': '00:00', 'time_phrase': 'в 16:00',
+        })
+        command = ExternalCommandExtractor(client).extract(
+            'Создай встречу с Иваном завтра в 16:00',
+            'Europe/Moscow', datetime.date(2026, 10, 11),
+        )
+        self.assertEqual(command.date, datetime.date(2026, 10, 12))
+        self.assertEqual(command.time, '16:00')
 
     def test_external_extractor_rejects_bad_model_json(self):
         client = FakeModelClient({'action': 'delete_everything'})

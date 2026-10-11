@@ -26,6 +26,19 @@ class FakeRepository:
             self.embeddings[(entry.id, embedding_model)] = embedding
         return entry
 
+    def create_once(self, *, kind, title, date, time, timezone, embedding, embedding_model):
+        for entry in self.items:
+            if (
+                entry.kind == kind and entry.title.casefold() == title.casefold()
+                and entry.date == date and entry.time == time
+                and entry.timezone == timezone and entry.status == EntryStatus.pending
+            ):
+                return entry, False
+        return self.create(
+            kind=kind, title=title, date=date, time=time, timezone=timezone,
+            embedding=embedding, embedding_model=embedding_model,
+        ), True
+
     def list_period(self, date_from, date_to, *, kind=None, status=None):
         return [entry for entry in self.items if entry.date is not None
                 and date_from <= entry.date <= date_to
@@ -64,7 +77,7 @@ class FakeExtractor:
     def __init__(self, command):
         self.command = command
 
-    def extract(self, text, timezone, today):
+    def extract(self, text, timezone, today, previous=None, history=None):
         return self.command
 
 
@@ -92,6 +105,45 @@ class EntryFlowTests(unittest.TestCase):
 
         self.assertEqual(len(repository.last_embedding), 384)
         self.assertEqual(entries.list_period(date, date, kind=EntryKind.task), repository.items)
+
+    def test_list_command_filters_requested_kind(self):
+        repository = FakeRepository()
+        entries = EntryService(repository)
+        date = datetime.date(2026, 10, 10)
+        for kind, title in ((EntryKind.task, 'Отчёт'), (EntryKind.meeting, 'Встреча')):
+            entries.create(kind=kind, title=title, date=date, time=None,
+                           timezone='Europe/Moscow')
+
+        command = AssistantCommand.model_validate({
+            'action': 'list_entries', 'kind': 'meeting',
+            'date_from': '2026-10-10', 'date_to': '2026-10-10',
+        })
+        turn = AssistantService(entries=entries, extractor=FakeExtractor(command)).handle_message(
+            'Какие встречи сегодня?', 'Europe/Moscow', None,
+        )
+        self.assertEqual(turn.status, AssistantStatus.completed)
+        self.assertEqual([entry.title for entry in turn.entries], ['Встреча'])
+
+        search = AssistantCommand.model_validate({
+            'action': 'search_entries', 'kind': 'task', 'query': 'Отчёт',
+        })
+        turn = AssistantService(entries=entries, extractor=FakeExtractor(search)).handle_message(
+            'Найди задачу про отчёт', 'Europe/Moscow', None,
+        )
+        self.assertEqual([entry.title for entry in turn.entries], ['Отчёт'])
+
+    def test_repeated_create_command_returns_existing_entry(self):
+        repository = FakeRepository()
+        entries = EntryService(repository)
+        command = AssistantCommand.model_validate({
+            'action': 'create_entry', 'kind': 'task', 'title': 'Разобраться с уроками',
+        })
+        service = AssistantService(entries=entries, extractor=FakeExtractor(command))
+        first = service.handle_message('Создай задачу разобраться с уроками', 'Europe/Moscow', None)
+        second = service.handle_message('Создай задачу разобраться с уроками', 'Europe/Moscow', None)
+        self.assertEqual(len(repository.items), 1)
+        self.assertEqual(first.entries[0].id, second.entries[0].id)
+        self.assertIn('уже есть', second.assistant_text)
 
     def test_text_search_survives_embedding_failure(self):
         class BrokenEmbedder:

@@ -5,6 +5,7 @@ from sqlalchemy import create_engine
 
 from src.db_config import get_database_url
 from src.models.entry import Base
+import src.models.conversation  # noqa: F401 - register tables in Base.metadata
 
 
 database_url = get_database_url()

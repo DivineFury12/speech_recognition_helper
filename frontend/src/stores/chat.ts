@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia'
-import { ref, watch } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { sendAudioMessage, sendTextMessage } from '@/api/client'
 import type { AssistantTurn, Entry } from '@/api/types'
 import { timezone } from '@/utils/time'
@@ -25,7 +25,7 @@ interface Persisted {
 
 function load(): Persisted {
   try {
-    const raw = sessionStorage.getItem(STORAGE_KEY)
+    const raw = localStorage.getItem(STORAGE_KEY) ?? sessionStorage.getItem(STORAGE_KEY)
     if (raw) {
       const p = JSON.parse(raw) as Persisted
       if (Array.isArray(p.messages)) return { messages: p.messages.map((m) => ({ ...m, pending: false })), conversationId: p.conversationId ?? null }
@@ -42,6 +42,10 @@ export const useChatStore = defineStore('chat', () => {
   const messages = ref<ChatMessage[]>(initial.messages)
   const sending = ref(false)
   const conversationId = ref<string | null>(initial.conversationId)
+  const awaitingClarification = computed(() => {
+    const lastAssistant = [...messages.value].reverse().find((message) => message.role === 'assistant')
+    return lastAssistant?.status === 'needs_clarification'
+  })
   const retryLast = ref<(() => void) | null>(null)
 
   watch(
@@ -49,7 +53,7 @@ export const useChatStore = defineStore('chat', () => {
     () => {
       try {
         const data: Persisted = { messages: messages.value.slice(-MAX_STORED), conversationId: conversationId.value }
-        sessionStorage.setItem(STORAGE_KEY, JSON.stringify(data))
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(data))
       } catch {}
     },
     { deep: true },
@@ -72,7 +76,7 @@ export const useChatStore = defineStore('chat', () => {
         else if (m.voice) m.text = 'Речь не распознана'
         m.pending = false
       }
-      conversationId.value = turn.status === 'needs_clarification' ? turn.conversation_id : null
+      conversationId.value = turn.conversation_id
       messages.value.push({
         id: turn.turn_id,
         role: 'assistant',
@@ -121,5 +125,5 @@ export const useChatStore = defineStore('chat', () => {
     retryLast.value = null
   }
 
-  return { messages, sending, conversationId, retryLast, sendText, sendAudio, retry, reset }
+  return { messages, sending, conversationId, awaitingClarification, retryLast, sendText, sendAudio, retry, reset }
 })

@@ -32,6 +32,14 @@ class FakeTranscription:
         return 'Напомни завтра'
 
 
+class FakeConversations:
+    def __init__(self, conversation_id):
+        self.conversation_id = conversation_id
+
+    def list_messages(self, conversation_id):
+        return [] if conversation_id == self.conversation_id else None
+
+
 class AssistantApiTests(unittest.TestCase):
     def setUp(self):
         self.app = create_app()
@@ -81,6 +89,18 @@ class AssistantApiTests(unittest.TestCase):
             'text': '   ', 'timezone': 'Europe/Moscow',
         })
         self.assertEqual(response.status_code, 422)
+
+    def test_saved_conversation_history_route(self):
+        conversation_id = uuid4()
+        self.app.state.conversations = FakeConversations(conversation_id)
+        response = self.client.get(f'/v1/conversations/{conversation_id}/messages')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {
+            'conversation_id': str(conversation_id), 'messages': [],
+        })
+        self.assertEqual(
+            self.client.get(f'/v1/conversations/{uuid4()}/messages').status_code, 404,
+        )
 
 
 if __name__ == '__main__':

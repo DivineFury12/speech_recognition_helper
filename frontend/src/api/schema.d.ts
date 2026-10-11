@@ -73,9 +73,11 @@ export interface paths {
         /**
          * Отправить текстовый запрос ассистенту
          * @description Основной маршрут текстовой кнопки. Ассистент определяет намерение,
-         *     при необходимости сохраняет или ищет записи и возвращает ответ.
-         *     Если не хватает данных, status = needs_clarification; следующий ответ
-         *     пользователя отправляется с тем же conversation_id.
+         *     через GigaChat извлекает структурированную команду и возвращает ответ.
+         *     При подключённой БД создание, список и поиск возвращают status = completed.
+         *     При нехватке данных ответ имеет status = needs_clarification. Следующий
+         *     ответ пользователя отправляется с тем же conversation_id; история и
+         *     незавершённая команда сохраняются на сервере.
          */
         post: operations["sendTextMessage"];
         delete?: never;
@@ -211,6 +213,33 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        /**
+         * @description Внутренний структурированный ответ внешней модели. Backend проверяет его
+         *     перед сохранением или поиском; фронтенд этот объект не отправляет.
+         *     Для create_entry нужны kind и title; date и time обязательны для встречи
+         *     и напоминания. Для list_entries нужны date_from/date_to, для
+         *     search_entries — query. date_phrase и time_phrase должны содержать
+         *     точные фразы пользователя, подтверждающие дату и время. Отсутствующие
+         *     данные модель возвращает как null; обязательность для выполнения
+         *     конкретного действия проверяет сервер.
+         */
+        AssistantCommand: {
+            /** @enum {string} */
+            action: "create_entry" | "list_entries" | "search_entries" | "unknown";
+            /** @enum {string|null} */
+            kind: "task" | "reminder" | "meeting" | null;
+            title: string | null;
+            /** Format: date */
+            date: string | null;
+            date_phrase: string | null;
+            time: string | null;
+            time_phrase: string | null;
+            /** Format: date */
+            date_from: string | null;
+            /** Format: date */
+            date_to: string | null;
+            query: string | null;
+        };
         ErrorResponse: {
             detail: string;
         };
@@ -260,9 +289,9 @@ export interface components {
          * @example {
          *       "conversation_id": "550e8400-e29b-41d4-a716-446655440000",
          *       "turn_id": "4e8d4cb6-bf66-453c-a92b-71c578889103",
-         *       "user_text": "Поставь встречу с Иваном завтра",
-         *       "assistant_text": "На какое время поставить встречу?",
-         *       "status": "needs_clarification",
+         *       "user_text": "Поставь встречу с Иваном завтра в 15:00",
+         *       "assistant_text": "Сохранено: Встреча с Иваном.",
+         *       "status": "completed",
          *       "intent": "create_entry",
          *       "entries": []
          *     }
@@ -386,6 +415,24 @@ export interface components {
                 "application/json": components["schemas"]["ErrorResponse"];
             };
         };
+        /** @description Обработка команд ассистента пока не подключена */
+        NotImplemented: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["ErrorResponse"];
+            };
+        };
+        /** @description Ошибка GigaChat API или некорректный ответ модели */
+        ExternalModelError: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["ErrorResponse"];
+            };
+        };
     };
     parameters: {
         ConversationId: string;
@@ -497,6 +544,8 @@ export interface operations {
                 };
             };
             422: components["responses"]["ValidationError"];
+            501: components["responses"]["NotImplemented"];
+            502: components["responses"]["ExternalModelError"];
         };
     };
     sendAudioMessage: {
@@ -539,6 +588,8 @@ export interface operations {
             };
             400: components["responses"]["BadRequest"];
             422: components["responses"]["ValidationError"];
+            501: components["responses"]["NotImplemented"];
+            502: components["responses"]["ExternalModelError"];
         };
     };
     listConversationMessages: {

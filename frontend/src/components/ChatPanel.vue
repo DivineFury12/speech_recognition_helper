@@ -6,7 +6,7 @@ import { MAX_RECORD_SECONDS, useRecorder } from '@/composables/useRecorder'
 import EntryItem from './EntryItem.vue'
 
 const chat = useChatStore()
-const { messages, sending, conversationId, retryLast } = storeToRefs(chat)
+const { messages, sending, awaitingClarification, retryLast } = storeToRefs(chat)
 
 const draft = ref('')
 const listEl = ref<HTMLElement | null>(null)
@@ -93,7 +93,7 @@ watch(
       <button type="button" class="link" @click="chat.retry()">Повторить</button>
     </div>
     <div v-if="recError" class="banner error">{{ recError }}</div>
-    <div v-if="conversationId" class="banner info">
+    <div v-if="awaitingClarification" class="banner info">
       Ассистент ждёт ответа на уточнение.
       <button type="button" class="link" @click="chat.reset()">Начать заново</button>
     </div>
@@ -132,7 +132,7 @@ watch(
         v-model="draft"
         rows="1"
         aria-label="Сообщение ассистенту"
-        :placeholder="conversationId ? 'Ответьте на уточнение…' : 'Сообщение…'"
+        :placeholder="awaitingClarification ? 'Ответьте на уточнение…' : 'Сообщение…'"
         :disabled="sending"
         @keydown="onKeydown"
       />

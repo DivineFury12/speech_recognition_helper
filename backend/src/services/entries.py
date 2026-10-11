@@ -42,6 +42,19 @@ class EntryService:
             embedding_model=self._embedder.name if embedding is not None else None,
         )
 
+    def create_once(
+        self, *, kind: EntryKind, title: str, date: datetime.date | None,
+        time: str | None, timezone: str,
+    ) -> tuple[Entry, bool]:
+        """Return the matching pending entry when the same command is repeated."""
+        title = ' '.join(title.split())
+        embedding = self._embedding(title)
+        return self._repository.create_once(
+            kind=kind, title=title, date=date, time=time, timezone=timezone,
+            embedding=embedding,
+            embedding_model=self._embedder.name if embedding is not None else None,
+        )
+
     def list_period(
         self, date_from: datetime.date, date_to: datetime.date, *,
         kind: EntryKind | None = None, status: EntryStatus | None = None,

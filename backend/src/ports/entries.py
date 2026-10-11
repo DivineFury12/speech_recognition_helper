@@ -14,6 +14,12 @@ class EntryRepository(typing.Protocol):
         embedding_model: str | None,
     ) -> Entry: ...
 
+    def create_once(
+        self, *, kind: EntryKind, title: str, date: datetime.date | None,
+        time: str | None, timezone: str, embedding: list[float] | None,
+        embedding_model: str | None,
+    ) -> tuple[Entry, bool]: ...
+
     def list_period(
         self, date_from: datetime.date, date_to: datetime.date, *,
         kind: EntryKind | None = None, status: EntryStatus | None = None,

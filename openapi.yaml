@@ -5,7 +5,7 @@ info:
   description: |
     Контракт прототипа для фронтенда. Ручки с x-implementation-status: implemented
     уже работают; partial доступны в API и при настроенном GigaChat выполняют
-    создание, список и поиск записей, но уточняющий диалог ещё не подключён.
+    создание, список и поиск записей, включая уточняющий диалог.
     Без ключа GigaChat маршруты ассистента отвечают 501; planned описывают
     следующий этап.
     x-requirement-level: core отмечает публичные ручки минимального сценария,
@@ -109,9 +109,9 @@ paths:
         Основной маршрут текстовой кнопки. Ассистент определяет намерение,
         через GigaChat извлекает структурированную команду и возвращает ответ.
         При подключённой БД создание, список и поиск возвращают status = completed.
-        При нехватке данных ответ имеет status = no_action. После реализации диалога
-        уточнения будут иметь status = needs_clarification, а следующий ответ
-        пользователя будет отправляться с тем же conversation_id.
+        При нехватке данных ответ имеет status = needs_clarification. Следующий
+        ответ пользователя отправляется с тем же conversation_id; история и
+        незавершённая команда сохраняются на сервере.
       x-implementation-status: partial
       x-requirement-level: core
       requestBody:
@@ -195,7 +195,7 @@ paths:
       tags: [Conversations]
       operationId: listConversationMessages
       summary: Получить историю диалога
-      x-implementation-status: planned
+      x-implementation-status: implemented
       x-requirement-level: additional
       parameters:
         - $ref: '#/components/parameters/ConversationId'
@@ -458,8 +458,11 @@ components:
         перед сохранением или поиском; фронтенд этот объект не отправляет.
         Для create_entry нужны kind и title; date и time обязательны для встречи
         и напоминания. Для list_entries нужны date_from/date_to, для
-        search_entries — query. Отсутствующие данные модель возвращает как null.
-      required: [action]
+        search_entries — query. date_phrase и time_phrase должны содержать
+        точные фразы пользователя, подтверждающие дату и время. Отсутствующие
+        данные модель возвращает как null; обязательность для выполнения
+        конкретного действия проверяет сервер.
+      required: [action, kind, title, date, date_phrase, time, time_phrase, date_from, date_to, query]
       properties:
         action:
           type: string
@@ -475,9 +478,15 @@ components:
           type: string
           format: date
           nullable: true
+        date_phrase:
+          type: string
+          nullable: true
         time:
           type: string
           pattern: '^([01][0-9]|2[0-3]):[0-5][0-9]$'
+          nullable: true
+        time_phrase:
+          type: string
           nullable: true
         date_from:
           type: string

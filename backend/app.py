@@ -9,7 +9,9 @@ import src.adapters.ffmeg
 import src.adapters.gigachat
 import src.adapters.local_embeddings
 import src.adapters.entry_repository
+import src.adapters.conversation_repository
 import src.api.assistant.router
+import src.api.conversations.router
 import src.api.entries.router
 import src.api.transcribe.router
 import src.db
@@ -69,11 +71,15 @@ def create_app(settings: src.settings.Settings | None = None) -> fastapi.FastAPI
                     cache_dir=str(config.cache_dir.parent / 'embeddings'),
                 ),
             )
+            app.state.conversations = (
+                src.adapters.conversation_repository.SqlAlchemyConversationRepository(sessions)
+            )
 
         if gigachat_client is not None:
             app.state.assistant_service = src.services.assistant.AssistantService(
                 src.services.command_extractor.ExternalCommandExtractor(gigachat_client),
                 app.state.entries_service,
+                app.state.conversations,
             )
 
         try:
@@ -82,6 +88,7 @@ def create_app(settings: src.settings.Settings | None = None) -> fastapi.FastAPI
             app.state.transcription_service = None
             app.state.assistant_service = None
             app.state.entries_service = None
+            app.state.conversations = None
             if gigachat_client is not None:
                 gigachat_client.close()
             if engine is not None:
@@ -93,8 +100,10 @@ def create_app(settings: src.settings.Settings | None = None) -> fastapi.FastAPI
     )
     app.state.assistant_service = None
     app.state.entries_service = None
+    app.state.conversations = None
     app.include_router(src.api.transcribe.router.router)
     app.include_router(src.api.assistant.router.router)
+    app.include_router(src.api.conversations.router.router)
     app.include_router(src.api.entries.router.router)
 
     @app.exception_handler(src.errors.AudioConversionError)

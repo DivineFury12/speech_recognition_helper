@@ -12,5 +12,7 @@ class CommandExtractor(typing.Protocol):
         text: str,
         timezone: str,
         today: datetime.date,
+        previous: AssistantCommand | None = None,
+        history: list[dict[str, str]] | None = None,
     ) -> AssistantCommand:
         ...

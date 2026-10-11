@@ -1,6 +1,7 @@
 """PostgreSQL entry persistence and nearest-neighbor search."""
 
 import datetime
+import hashlib
 import uuid
 
 from sqlalchemy import func, select
@@ -30,20 +31,63 @@ class SqlAlchemyEntryRepository:
         embedding_model: str | None,
     ) -> Entry:
         with self._sessions.begin() as session:
-            row = EntryRow(
-                id=uuid.uuid4(), kind=kind.value, title=title, date=date,
-                time=time, timezone=timezone, status=EntryStatus.pending.value,
+            return self._insert(
+                session, kind=kind, title=title, date=date, time=time,
+                timezone=timezone, embedding=embedding, embedding_model=embedding_model,
             )
-            session.add(row)
-            session.flush()
-            if embedding is not None:
-                if embedding_model is None:
-                    raise ValueError('embedding_model is required for a vector')
-                session.add(EntryEmbeddingRow(
-                    entry_id=row.id, model_name=embedding_model, embedding=embedding,
-                ))
-            session.refresh(row)
-            return _to_entry(row)
+
+    @staticmethod
+    def _insert(
+        session: Session, *, kind: EntryKind, title: str,
+        date: datetime.date | None, time: str | None, timezone: str,
+        embedding: list[float] | None, embedding_model: str | None,
+    ) -> Entry:
+        row = EntryRow(
+            id=uuid.uuid4(), kind=kind.value, title=title, date=date,
+            time=time, timezone=timezone, status=EntryStatus.pending.value,
+        )
+        session.add(row)
+        session.flush()
+        if embedding is not None:
+            if embedding_model is None:
+                raise ValueError('embedding_model is required for a vector')
+            session.add(EntryEmbeddingRow(
+                entry_id=row.id, model_name=embedding_model, embedding=embedding,
+            ))
+        session.refresh(row)
+        return _to_entry(row)
+
+    def create_once(
+        self, *, kind: EntryKind, title: str, date: datetime.date | None,
+        time: str | None, timezone: str, embedding: list[float] | None,
+        embedding_model: str | None,
+    ) -> tuple[Entry, bool]:
+        normalized_title = ' '.join(title.casefold().split())
+        signature = '\x1f'.join((
+            kind.value, normalized_title, date.isoformat() if date else '',
+            time or '', timezone,
+        ))
+        lock_key = int.from_bytes(
+            hashlib.sha256(signature.encode('utf-8')).digest()[:8], 'big', signed=True,
+        )
+        with self._sessions.begin() as session:
+            session.execute(select(func.pg_advisory_xact_lock(lock_key)))
+            existing = session.scalar(
+                select(EntryRow).where(
+                    EntryRow.kind == kind.value,
+                    func.lower(EntryRow.title) == normalized_title,
+                    EntryRow.date == date,
+                    EntryRow.time == time,
+                    EntryRow.timezone == timezone,
+                    EntryRow.status == EntryStatus.pending.value,
+                ).order_by(EntryRow.created_at.desc()).limit(1)
+            )
+            if existing is not None:
+                return _to_entry(existing), False
+            return self._insert(
+                session, kind=kind, title=title, date=date, time=time,
+                timezone=timezone, embedding=embedding, embedding_model=embedding_model,
+            ), True
 
     def list_period(
         self,

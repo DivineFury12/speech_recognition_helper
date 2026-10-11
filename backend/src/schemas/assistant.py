@@ -1,5 +1,6 @@
 import datetime
 import enum
+import typing
 import uuid
 
 import pydantic
@@ -69,3 +70,15 @@ class AssistantTurn(pydantic.BaseModel):
     status: AssistantStatus
     intent: AssistantIntent
     entries: list[Entry]
+
+
+class ConversationMessage(pydantic.BaseModel):
+    id: uuid.UUID
+    role: typing.Literal['user', 'assistant']
+    text: str
+    created_at: datetime.datetime
+
+
+class ConversationHistory(pydantic.BaseModel):
+    conversation_id: uuid.UUID
+    messages: list[ConversationMessage]

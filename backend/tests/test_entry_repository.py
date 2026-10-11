@@ -49,6 +49,22 @@ class EntryRepositoryIntegrationTests(unittest.TestCase):
             with self.sessions.begin() as session:
                 session.execute(delete(EntryRow).where(EntryRow.id == entry.id))
 
+    def test_repeated_create_once_keeps_one_pending_entry(self):
+        title = f'Duplicate check {uuid.uuid4()}'
+        args = dict(
+            kind=EntryKind.task, title=title, date=None, time=None,
+            timezone='Europe/Moscow', embedding=None, embedding_model=None,
+        )
+        first, first_created = self.repository.create_once(**args)
+        try:
+            second, second_created = self.repository.create_once(**args)
+            self.assertTrue(first_created)
+            self.assertFalse(second_created)
+            self.assertEqual(first.id, second.id)
+        finally:
+            with self.sessions.begin() as session:
+                session.execute(delete(EntryRow).where(EntryRow.id == first.id))
+
 
 if __name__ == '__main__':
     unittest.main()

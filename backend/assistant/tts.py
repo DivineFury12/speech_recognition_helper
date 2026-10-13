@@ -1,13 +1,13 @@
-"""Озвучка ответов голосами XTTS-v2: клоны по образцам из backend/voices и встроенный голос."""
+"""Озвучка ответов моделью Silero TTS (русская, работает на процессоре)."""
 
 import hashlib
 import io
 import logging
-import os
 import re
 import shutil
 import subprocess
 import threading
+import urllib.request
 import wave
 from collections import OrderedDict
 from dataclasses import dataclass
@@ -17,16 +17,14 @@ from .speech_text import for_speech
 
 log = logging.getLogger(__name__)
 
-SAMPLE_RATE = 24000
+MODEL_URL = "https://models.silero.ai/models/tts/ru/v4_ru.pt"
+MODEL_FILE = "v4_ru.pt"
+SAMPLE_RATE = 48000
 CACHE_ITEMS = 64
 MAX_CHARS = 600
-CHUNK_CHARS = 170
-PAUSE_SECONDS = 0.18
-STUDIO_FILTER = (
-    "highpass=f=70,lowpass=f=11500,afftdn=nr=6:nf=-50:tn=1,deesser=i=0.3,"
-    "acompressor=threshold=-21dB:ratio=2.5:attack=8:release=80:makeup=1.5,"
-    "loudnorm=I=-16:TP=-1.5:LRA=8"
-)
+CHUNK_CHARS = 300
+PAUSE_SECONDS = 0.15
+STUDIO_FILTER = "highpass=f=60,loudnorm=I=-16:TP=-1.5:LRA=8"
 
 
 def _cut_long(sentence: str, limit: int) -> list[str]:
@@ -77,33 +75,19 @@ class Voice:
     id: str
     name: str
     description: str
-    file: str | None = None
-    builtin: str | None = None
+    speaker: str
 
 
 VOICES = [
-    Voice("nikita", "Никита", "мужской голос", file="nikita.wav"),
-    Voice("sergey", "Сергей", "мужской голос", file="sergey.wav"),
-    Voice("alina", "Алина", "женский голос", builtin="Asya Anara"),
+    Voice("alina", "Алина", "женский голос", "xenia"),
+    Voice("ksenia", "Ксения", "женский голос", "kseniya"),
+    Voice("aidar", "Айдар", "мужской голос", "aidar"),
+    Voice("evgeny", "Евгений", "мужской голос", "eugene"),
 ]
 
 
 class TTSUnavailableError(RuntimeError):
     pass
-
-
-def _load_audio(path, sampling_rate):
-    import soundfile
-    import torch
-    import torchaudio
-
-    data, rate = soundfile.read(str(path), dtype="float32", always_2d=True)
-    audio = torch.from_numpy(data.T.copy())
-    if audio.size(0) != 1:
-        audio = audio.mean(dim=0, keepdim=True)
-    if rate != sampling_rate:
-        audio = torchaudio.functional.resample(audio, rate, sampling_rate)
-    return audio.clamp_(-1, 1)
 
 
 def _wav_bytes(samples) -> bytes:
@@ -119,16 +103,22 @@ def _wav_bytes(samples) -> bytes:
     return buf.getvalue()
 
 
-GENERATION = {"temperature": 0.55, "top_p": 0.8, "repetition_penalty": 5.0}
+def download_model(model_dir: str) -> Path:
+    path = Path(model_dir) / MODEL_FILE
+    if not path.is_file():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".part")
+        urllib.request.urlretrieve(MODEL_URL, tmp)
+        tmp.replace(path)
+    return path
 
 
-class XttsEngine:
-    def __init__(self, model_dir: str, voices_dir: str, device: str = "auto") -> None:
-        self.model_dir = Path(model_dir)
-        self.voices_dir = Path(voices_dir)
+class SileroEngine:
+    def __init__(self, model_dir: str, device: str = "cpu", threads: int = 4) -> None:
+        self.model_dir = model_dir
         self.device = device
+        self.threads = threads
         self._model = None
-        self._latents: dict[str, tuple] = {}
         self._lock = threading.Lock()
         self._ready = threading.Event()
         self._error: str | None = None
@@ -143,42 +133,24 @@ class XttsEngine:
         return self._error
 
     def voices(self) -> list[Voice]:
-        if self.ready:
-            return [v for v in VOICES if v.id in self._latents]
-        return [v for v in VOICES if v.builtin or (self.voices_dir / v.file).is_file()]
+        return VOICES
 
     def load(self) -> None:
         try:
-            os.environ.setdefault("COQUI_TOS_AGREED", "1")
             import torch
-            import TTS.tts.models.xtts as xtts_module
-            from TTS.tts.configs.xtts_config import XttsConfig
-            from TTS.tts.models.xtts import Xtts
 
-            xtts_module.load_audio = _load_audio
-            if not (self.model_dir / "model.pth").is_file():
-                raise TTSUnavailableError(f"Нет весов XTTS в {self.model_dir}")
+            path = download_model(self.model_dir)
             device = self.device
             if device == "auto":
-                device = "cuda" if torch.cuda.is_available() else "cpu"
-            config = XttsConfig()
-            config.load_json(str(self.model_dir / "config.json"))
-            model = Xtts.init_from_config(config)
-            model.load_checkpoint(config, checkpoint_dir=str(self.model_dir), use_deepspeed=False)
-            model.to(device).eval()
-            speakers = model.speaker_manager.speakers if model.speaker_manager else {}
-            for v in VOICES:
-                if v.builtin and v.builtin in speakers:
-                    s = speakers[v.builtin]
-                    self._latents[v.id] = (s["gpt_cond_latent"], s["speaker_embedding"])
-                elif v.file and (self.voices_dir / v.file).is_file():
-                    latent, emb = model.get_conditioning_latents(audio_path=[str(self.voices_dir / v.file)])
-                    self._latents[v.id] = (latent, emb)
-                else:
-                    log.warning("Голос %s пропущен: нет образца", v.id)
+                device = "cpu"
+            if device == "cpu":
+                torch.set_num_threads(self.threads)
+            model = torch.package.PackageImporter(str(path)).load_pickle("tts_models", "model")
+            model.to(torch.device(device))
+            model.apply_tts(text="Готово.", speaker=VOICES[0].speaker, sample_rate=SAMPLE_RATE)
             self._model = model
             self._ready.set()
-            log.info("Озвучка XTTS готова на %s, голоса: %s", device, ", ".join(self._latents))
+            log.info("Озвучка Silero готова на %s", device)
         except Exception as e:
             self._error = str(e)
             log.error("Озвучка недоступна: %s", e)
@@ -186,10 +158,11 @@ class XttsEngine:
     def synthesize(self, text: str, voice_id: str) -> bytes:
         if not self.ready:
             raise TTSUnavailableError(self._error or "Модель озвучки ещё загружается")
-        if voice_id not in self._latents:
+        voice = next((v for v in VOICES if v.id == voice_id), None)
+        if voice is None:
             raise KeyError(voice_id)
         spoken = for_speech(text)[:MAX_CHARS]
-        if not spoken:
+        if not re.search(r"[а-яёa-z0-9]", spoken, re.I):
             raise ValueError("Пустой текст")
         key = hashlib.sha1(f"{voice_id}\0{spoken}".encode()).hexdigest()
         with self._lock:
@@ -198,14 +171,12 @@ class XttsEngine:
                 return self._cache[key]
             import numpy as np
 
-            latent, emb = self._latents[voice_id]
             pause = np.zeros(int(SAMPLE_RATE * PAUSE_SECONDS), dtype="float32")
             parts = []
             for chunk in split_for_tts(spoken):
-                out = self._model.inference(
-                    chunk, "ru", latent, emb, enable_text_splitting=False, **GENERATION,
-                )
-                parts += [np.asarray(out["wav"], dtype="float32"), pause]
+                out = self._model.apply_tts(text=chunk, speaker=voice.speaker, sample_rate=SAMPLE_RATE,
+                                            put_accent=True, put_yo=True)
+                parts += [out.numpy().astype("float32"), pause]
             audio = studio(_wav_bytes(np.concatenate(parts[:-1])))
             self._cache[key] = audio
             if len(self._cache) > CACHE_ITEMS:
@@ -213,12 +184,12 @@ class XttsEngine:
             return audio
 
 
-def create_engine(enabled: bool, model_dir: str, voices_dir: str, device: str = "auto") -> XttsEngine | None:
+def create_engine(enabled: bool, model_dir: str, device: str = "cpu") -> SileroEngine | None:
     if not enabled:
         return None
     try:
-        import TTS  # noqa: F401
+        import torch  # noqa: F401
     except ImportError:
-        log.warning("Озвучка отключена: не установлен пакет coqui-tts")
+        log.warning("Озвучка отключена: не установлен torch")
         return None
-    return XttsEngine(model_dir, voices_dir, device)
+    return SileroEngine(model_dir, device)

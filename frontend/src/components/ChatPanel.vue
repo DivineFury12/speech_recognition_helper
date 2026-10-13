@@ -19,6 +19,14 @@ const recorder = useRecorder(({ blob, filename }) => chat.sendAudio(blob, filena
 const { isRecording, elapsed, error: recError } = recorder
 
 const hasText = computed(() => draft.value.trim().length > 0)
+const suggestions = computed(() => {
+  const last = messages.value[messages.value.length - 1]
+  return last?.role === 'assistant' && !sending.value ? (last.suggestions ?? []) : []
+})
+
+function pick(text: string) {
+  void chat.sendText(text)
+}
 const mode = computed<'send' | 'mic'>(() => (isRecording.value || hasText.value || !voiceEnabled.value ? 'send' : 'mic'))
 const timer = computed(() => `${Math.floor(elapsed.value / 60)}:${String(elapsed.value % 60).padStart(2, '0')}`)
 const actionLabel = computed(() => {
@@ -49,10 +57,15 @@ function autoresize() {
   el.style.height = 'auto'
   el.style.height = `${Math.min(el.scrollHeight, 140)}px`
 }
-watch(draft, () => nextTick(autoresize))
+watch(draft, (value, old) => {
+  if (value && !old) stopSpeech()
+  void nextTick(autoresize)
+})
 
 function onGlobalKeydown(e: KeyboardEvent) {
-  if (e.key === 'Escape' && isRecording.value) recorder.cancel()
+  if (e.key !== 'Escape') return
+  if (isRecording.value) recorder.cancel()
+  else stopSpeech()
 }
 onMounted(() => window.addEventListener('keydown', onGlobalKeydown))
 onBeforeUnmount(() => window.removeEventListener('keydown', onGlobalKeydown))
@@ -97,6 +110,9 @@ watch(
             <EntryItem v-for="e in m.entries" :key="`${e.id}:${e.date ?? ''}`" :entry="e" compact />
           </ul>
         </div>
+      </div>
+      <div v-if="suggestions.length" class="suggestions" aria-label="Быстрые ответы">
+        <button v-for="s in suggestions" :key="s" type="button" class="chip" @click="pick(s)">{{ s }}</button>
       </div>
       <div v-if="sending" class="msg assistant">
         <div class="bubble typing"><span /><span /><span /></div>

@@ -3,7 +3,8 @@ uvicorn[standard]
 python-multipart
 gigachat
 tzdata
-transformers>=4.57,<5
-coqui-tts>=0.27.5,<0.28
+transformers>=5.10
 soundfile
 num2words
+httpx
+cryptography

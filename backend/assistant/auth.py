@@ -64,6 +64,10 @@ class Sessions:
         self._secret = secret
         self.access_code = access_code
 
+    @property
+    def secret(self) -> bytes:
+        return self._secret
+
     def _sign(self, payload: bytes) -> str:
         return _b64(hmac.new(self._secret, payload, hashlib.sha256).digest())
 
@@ -88,15 +92,58 @@ class Sessions:
             return None
 
     def check_code(self, code: str) -> bool:
-        return bool(self.access_code) and hmac.compare_digest(code.strip().encode(), self.access_code.encode())
+        if not self.access_code:
+            return False
+        given = hashlib.sha256(code.strip().encode()).digest()
+        return hmac.compare_digest(given, hashlib.sha256(self.access_code.encode()).digest())
 
-    def feed_token(self, user_id: str) -> str:
-        return f"{user_id}.{self._sign(('feed:' + user_id).encode())[:32]}"
+    def _feed_sig(self, user_id: str, version: int) -> str:
+        payload = f"feed:{user_id}" if version == 0 else f"feed:{user_id}:{version}"
+        return self._sign(payload.encode())[:32]
 
-    def feed_user(self, token: str) -> str | None:
-        user_id, _, signature = token.partition(".")
-        expected = self._sign(("feed:" + user_id).encode())[:32]
-        return user_id if signature and hmac.compare_digest(signature, expected) else None
+    def feed_token(self, user_id: str, version: int = 0) -> str:
+        if version == 0:
+            return f"{user_id}.{self._feed_sig(user_id, 0)}"
+        return f"{user_id}.{version}.{self._feed_sig(user_id, version)}"
+
+    def feed_user(self, token: str) -> tuple[str, int] | None:
+        parts = token.split(".")
+        if len(parts) == 2:
+            user_id, version, signature = parts[0], 0, parts[1]
+        elif len(parts) == 3 and parts[1].isdigit():
+            user_id, version, signature = parts[0], int(parts[1]), parts[2]
+        else:
+            return None
+        ok = hmac.compare_digest(signature, self._feed_sig(user_id, version))
+        return (user_id, version) if ok else None
+
+
+class Lockout:
+    """Блокирует перебор кода доступа: после N неудачных попыток — пауза."""
+
+    def __init__(self, attempts: int = 5, seconds: float = 900) -> None:
+        self.attempts = attempts
+        self.seconds = seconds
+        self._fails: dict[str, deque] = {}
+        self._lock = threading.Lock()
+
+    def blocked(self, key: str) -> bool:
+        now = time.monotonic()
+        with self._lock:
+            fails = self._fails.get(key)
+            while fails and now - fails[0] > self.seconds:
+                fails.popleft()
+            return bool(fails) and len(fails) >= self.attempts
+
+    def fail(self, key: str) -> None:
+        with self._lock:
+            self._fails.setdefault(key, deque()).append(time.monotonic())
+            if len(self._fails) > 10_000:
+                self._fails.clear()
+
+    def reset(self, key: str) -> None:
+        with self._lock:
+            self._fails.pop(key, None)
 
 
 class RateLimiter:

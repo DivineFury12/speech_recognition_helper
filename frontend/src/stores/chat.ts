@@ -1,9 +1,9 @@
 import { defineStore } from 'pinia'
 import { ref, watch } from 'vue'
-import { sendAudioMessage, sendTextMessage } from '@/api/client'
+import { getDailySummary, sendAudioMessage, sendTextMessage } from '@/api/client'
 import type { AssistantTurn, Entry } from '@/api/types'
-import { speak } from '@/composables/useSpeech'
-import { timezone } from '@/utils/time'
+import { speak, stopSpeech } from '@/composables/useSpeech'
+import { isoDate, timezone } from '@/utils/time'
 import { useEntriesStore } from './entries'
 
 export interface ChatMessage {
@@ -14,7 +14,10 @@ export interface ChatMessage {
   entries?: Entry[]
   pending?: boolean
   voice?: boolean
+  suggestions?: string[]
 }
+
+const SUMMARY_KEY = 'assistant-summary-day'
 
 const STORAGE_KEY = 'assistant-chat-v2'
 const MAX_STORED = 100
@@ -74,6 +77,7 @@ export const useChatStore = defineStore('chat', () => {
     retry: () => void,
   ) {
     const userId = localId()
+    stopSpeech()
     messages.value.push({ id: userId, role: 'user', ...user, pending: !!user.voice })
     sending.value = true
     retryLast.value = null
@@ -94,6 +98,7 @@ export const useChatStore = defineStore('chat', () => {
         text: turn.assistant_text,
         status: turn.status,
         entries: turn.entries,
+        suggestions: turn.suggestions ?? [],
       })
     } catch (e) {
       const m = messages.value.find((x) => x.id === userId)
@@ -124,6 +129,26 @@ export const useChatStore = defineStore('chat', () => {
     )
   }
 
+  async function showDailySummary() {
+    const day = isoDate(new Date())
+    try {
+      if (localStorage.getItem(SUMMARY_KEY) === day) return
+    } catch {}
+    try {
+      const summary = await getDailySummary(timezone)
+      messages.value.push({
+        id: localId(),
+        role: 'assistant',
+        text: summary.assistant_text,
+        status: 'completed',
+        entries: summary.entries,
+      })
+      try {
+        localStorage.setItem(SUMMARY_KEY, day)
+      } catch {}
+    } catch {}
+  }
+
   function retry() {
     const fn = retryLast.value
     retryLast.value = null
@@ -137,5 +162,5 @@ export const useChatStore = defineStore('chat', () => {
     retryLast.value = null
   }
 
-  return { messages, sending, conversationId, awaiting, retryLast, sendText, sendAudio, retry, reset }
+  return { messages, sending, conversationId, awaiting, retryLast, sendText, sendAudio, retry, reset, showDailySummary }
 })

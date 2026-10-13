@@ -1,15 +1,17 @@
 import json
+import logging
 import sqlite3
 from array import array
 import threading
 import uuid
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from .dates import occurrences
 
 DEFAULT_USER = "local"
+log = logging.getLogger(__name__)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS entries (
@@ -49,6 +51,13 @@ CREATE TABLE IF NOT EXISTS entry_embeddings (
     title TEXT NOT NULL,
     vector BLOB NOT NULL,
     PRIMARY KEY (entry_id, model)
+);
+
+CREATE TABLE IF NOT EXISTS user_settings (
+    user_id TEXT PRIMARY KEY,
+    feed_version INTEGER NOT NULL DEFAULT 0,
+    google_token TEXT,
+    google_calendar_id TEXT
 );
 
 CREATE TABLE IF NOT EXISTS drafts (
@@ -92,6 +101,7 @@ class Storage:
         self._db.execute("PRAGMA foreign_keys = ON")
         self._lock = threading.RLock()
         self._draft_ttl = draft_ttl
+        self.listeners: list[Callable[[str, str, dict[str, Any]], None]] = []
         with self._lock, self._db:
             self._db.executescript(SCHEMA)
             for table, columns in MIGRATIONS.items():
@@ -103,6 +113,15 @@ class Storage:
 
     def close(self) -> None:
         self._db.close()
+
+    def _notify(self, op: str, entry: dict[str, Any] | None, user_id: str) -> None:
+        if entry is None:
+            return
+        for listener in self.listeners:
+            try:
+                listener(op, entry, user_id)
+            except Exception:
+                log.exception("Ошибка обработчика изменений записи")
 
     def _fetchone(self, sql: str, args: tuple | list = ()) -> sqlite3.Row | None:
         with self._lock:
@@ -130,7 +149,22 @@ class Storage:
                 " status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)",
                 (entry_id, user_id, kind, title, date, time, timezone, duration_minutes, recurrence, utc_now()),
             )
-        return self.get_entry(entry_id, user_id)
+        entry = self.get_entry(entry_id, user_id)
+        self._notify("upsert", entry, user_id)
+        return entry
+
+    def restore_entry(self, entry: dict[str, Any], user_id: str = DEFAULT_USER) -> dict[str, Any]:
+        with self._lock, self._db:
+            self._db.execute(
+                "INSERT OR REPLACE INTO entries (id, user_id, kind, title, date, time, timezone, duration_minutes,"
+                " recurrence, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (entry["id"], user_id, entry["kind"], entry["title"], entry.get("date"), entry.get("time"),
+                 entry["timezone"], entry.get("duration_minutes"), entry.get("recurrence"),
+                 entry.get("status") or "pending", entry["created_at"], utc_now()),
+            )
+        restored = self.get_entry(entry["id"], user_id)
+        self._notify("upsert", restored, user_id)
+        return restored
 
     def get_entry(self, entry_id: str, user_id: str = DEFAULT_USER) -> dict[str, Any] | None:
         row = self._fetchone("SELECT * FROM entries WHERE id = ? AND user_id = ?", (entry_id, user_id))
@@ -219,12 +253,37 @@ class Storage:
                 f"UPDATE entries SET {sets}, updated_at = ? WHERE id = ? AND user_id = ?",
                 (*changes.values(), utc_now(), entry_id, user_id),
             )
-        return self.get_entry(entry_id, user_id) if cur.rowcount else None
+        if not cur.rowcount:
+            return None
+        entry = self.get_entry(entry_id, user_id)
+        self._notify("upsert", entry, user_id)
+        return entry
 
     def delete_entry(self, entry_id: str, user_id: str = DEFAULT_USER) -> bool:
+        entry = self.get_entry(entry_id, user_id)
         with self._lock, self._db:
             cur = self._db.execute("DELETE FROM entries WHERE id = ? AND user_id = ?", (entry_id, user_id))
+        if cur.rowcount:
+            self._notify("delete", entry, user_id)
         return cur.rowcount > 0
+
+    def user_settings(self, user_id: str) -> dict[str, Any]:
+        row = self._fetchone("SELECT * FROM user_settings WHERE user_id = ?", (user_id,))
+        if row is None:
+            return {"user_id": user_id, "feed_version": 0, "google_token": None, "google_calendar_id": None}
+        return dict(row)
+
+    def update_user_settings(self, user_id: str, **values: Any) -> None:
+        allowed = {"feed_version", "google_token", "google_calendar_id"}
+        values = {k: v for k, v in values.items() if k in allowed}
+        with self._lock, self._db:
+            self._db.execute("INSERT OR IGNORE INTO user_settings (user_id) VALUES (?)", (user_id,))
+            if values:
+                sets = ", ".join(f"{k} = ?" for k in values)
+                self._db.execute(f"UPDATE user_settings SET {sets} WHERE user_id = ?", (*values.values(), user_id))
+
+    def google_users(self) -> list[str]:
+        return [r["user_id"] for r in self._fetchall("SELECT user_id FROM user_settings WHERE google_token IS NOT NULL")]
 
     def ensure_conversation(self, conversation_id: str | None, user_id: str = DEFAULT_USER) -> str:
         with self._lock, self._db:

@@ -6,7 +6,7 @@ ENV PYTHONUNBUFFERED=1 \
     XDG_CACHE_HOME=/cache \
     DB_PATH=/data/assistant.db \
     COQUI_TOS_AGREED=1 \
-    TTS_MODEL_DIR=/models/xtts_v2 \
+    TTS_MODEL_DIR=/models/silero \
     EMBEDDING_CACHE=/models/embeddings
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -22,7 +22,6 @@ RUN python -m pip install --break-system-packages -r requirements.txt \
 COPY app.py ml.py ./
 COPY assistant ./assistant
 COPY certs ./certs
-COPY voices ./voices
 RUN python -m assistant.models_download
 
 EXPOSE 8000

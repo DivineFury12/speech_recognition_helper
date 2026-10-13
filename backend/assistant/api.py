@@ -1,14 +1,16 @@
 import datetime as dt
+import logging
 import uuid
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, File, Form, HTTPException, Query, Request, Response, UploadFile
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import PlainTextResponse, RedirectResponse
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from .calendar_ics import build_calendar
 from .service import Assistant, InvalidTimezone, resolve_timezone
 
+log = logging.getLogger(__name__)
 TIME_PATTERN = r"^([01][0-9]|2[0-3]):[0-5][0-9]$"
 EntryKind = Literal["task", "reminder", "meeting"]
 EntryStatus = Literal["pending", "completed", "cancelled"]
@@ -45,10 +47,12 @@ class AssistantTurn(BaseModel):
     status: Literal["completed", "needs_clarification", "no_action"]
     intent: Intent
     entries: list[Entry]
+    suggestions: list[str] = Field(default_factory=list,
+                                   description="Короткие ответы-подсказки для кнопок под сообщением")
 
 
 class TextMessageRequest(BaseModel):
-    text: str = Field(min_length=1, max_length=2000)
+    text: str = Field(min_length=1, max_length=1000)
     timezone: str
     conversation_id: uuid.UUID | None = None
 
@@ -136,6 +140,26 @@ class CalendarLink(BaseModel):
     url: str
 
 
+class DailySummary(BaseModel):
+    assistant_text: str
+    entries: list[Entry]
+
+
+class ServiceState(BaseModel):
+    name: str
+    state: Literal["ok", "loading", "error", "off"]
+    detail: str
+
+
+class ServicesStatus(BaseModel):
+    services: list[ServiceState]
+
+
+class GoogleStatus(BaseModel):
+    configured: bool
+    connected: bool
+
+
 def _assistant(request: Request) -> Assistant:
     return request.app.state.assistant
 
@@ -190,13 +214,50 @@ def unlock_session(body: UnlockRequest, request: Request):
     if not sessions.access_code:
         return Response(status_code=204)
     client = request.client.host if request.client else "unknown"
-    if not request.app.state.unlock_limiter.allow(client):
-        raise HTTPException(429, "Слишком много попыток, попробуйте позже")
+    lockout = request.app.state.unlock_lockout
+    if lockout.blocked(client) or not request.app.state.unlock_limiter.allow(client):
+        raise HTTPException(429, "Слишком много неверных попыток, попробуйте через 15 минут")
     if not sessions.check_code(body.code):
+        lockout.fail(client)
         raise HTTPException(401, "Неверный код доступа")
+    lockout.reset(client)
     request.state.session.unlocked = True
     request.state.cookie_dirty = True
     return Response(status_code=204)
+
+
+@router.get("/assistant/summary", response_model=DailySummary, response_model_exclude_unset=True, tags=["Assistant"])
+def daily_summary(request: Request, timezone: Annotated[str, Query(max_length=64)]):
+    return _assistant(request).summary(_tz_or_422(timezone), _user(request))
+
+
+@router.get("/status", response_model=ServicesStatus, tags=["Session"])
+def services_status(request: Request):
+    state = request.app.state
+    llm = _assistant(request).llm
+    if llm is None:
+        items = [("Понимание команд", "off", "GigaChat не подключён, работают правила")]
+    elif getattr(llm, "healthy", True):
+        items = [("Понимание команд", "ok", f"{llm.name} отвечает")]
+    else:
+        items = [("Понимание команд", "error", f"{llm.name} не отвечает, работают правила — проверьте ключ")]
+    if not state.voice_enabled:
+        items.append(("Распознавание речи", "off", "голос выключен"))
+    else:
+        items.append(("Распознавание речи", "ok" if state.asr_ready() else "error",
+                      "GigaAM готов" if state.asr_ready() else "GigaAM или ffmpeg недоступен"))
+    tts = state.tts
+    if tts is None:
+        items.append(("Озвучка", "off", "озвучка на сервере выключена"))
+    elif tts.ready:
+        items.append(("Озвучка", "ok", "Silero готов"))
+    else:
+        items.append(("Озвучка", "error" if tts.error else "loading", "ошибка загрузки" if tts.error else "загружается"))
+    google = state.google
+    if google is not None and google.configured:
+        connected = google.connected(_user(request))
+        items.append(("Google Календарь", "ok" if connected else "off", "подключён" if connected else "не подключён"))
+    return {"services": [{"name": n, "state": s, "detail": d} for n, s, d in items]}
 
 
 @router.post("/assistant/messages", response_model=AssistantTurn, response_model_exclude_unset=True, tags=["Assistant"])
@@ -325,24 +386,91 @@ def delete_entry(entry_id: uuid.UUID, request: Request):
     return Response(status_code=204)
 
 
+def _feed_url(request: Request, user_id: str) -> str:
+    version = _assistant(request).storage.user_settings(user_id)["feed_version"]
+    token = request.app.state.sessions.feed_token(user_id, version)
+    return str(request.base_url).rstrip("/") + f"/v1/calendar/feed/{token}.ics"
+
+
 @router.get("/calendar", response_model=CalendarLink, tags=["Calendar"])
 def calendar_link(request: Request):
-    token = request.app.state.sessions.feed_token(_user(request))
-    return {"url": str(request.base_url).rstrip("/") + f"/v1/calendar/feed/{token}.ics"}
+    return {"url": _feed_url(request, _user(request))}
+
+
+@router.post("/calendar/rotate", response_model=CalendarLink, tags=["Calendar"])
+def rotate_calendar_link(request: Request):
+    user_id = _user(request)
+    storage = _assistant(request).storage
+    storage.update_user_settings(user_id, feed_version=storage.user_settings(user_id)["feed_version"] + 1)
+    return {"url": _feed_url(request, user_id)}
 
 
 @router.get("/calendar/feed/{token}.ics", tags=["Calendar"], response_class=PlainTextResponse)
 def calendar_feed(token: str, request: Request):
-    user_id = request.app.state.sessions.feed_user(token)
-    if user_id is None:
+    found = request.app.state.sessions.feed_user(token)
+    storage = _assistant(request).storage
+    if found is None or storage.user_settings(found[0])["feed_version"] != found[1]:
         raise HTTPException(404, "Календарь не найден")
+    user_id = found[0]
     body = build_calendar(_assistant(request).storage.all_entries(None, user_id))
     return Response(content=body, media_type="text/calendar; charset=utf-8",
                     headers={"Content-Disposition": 'inline; filename="assistant.ics"'})
 
 
+def _google(request: Request):
+    google = request.app.state.google
+    if google is None or not google.configured:
+        raise HTTPException(503, "Google Календарь не настроен: задайте GOOGLE_CLIENT_ID и GOOGLE_CLIENT_SECRET")
+    return google
+
+
+@router.get("/google/status", response_model=GoogleStatus, tags=["Google Calendar"])
+def google_status(request: Request):
+    google = request.app.state.google
+    configured = google is not None and google.configured
+    return {"configured": configured, "connected": configured and google.connected(_user(request))}
+
+
+@router.get("/google/connect", tags=["Google Calendar"], status_code=302)
+def google_connect(request: Request, origin: Annotated[str, Query(max_length=200)]):
+    google = _google(request)
+    origin = origin.rstrip("/")
+    allowed = set(request.app.state.google_origins) | {str(request.base_url).rstrip("/")}
+    if origin not in allowed:
+        raise HTTPException(400, "Этот адрес не разрешён для входа через Google (GOOGLE_ALLOWED_ORIGINS)")
+    return RedirectResponse(google.auth_url(_user(request), f"{origin}/v1/google/callback"), status_code=302)
+
+
+@router.get("/google/callback", tags=["Google Calendar"], status_code=302)
+def google_callback(request: Request, state: Annotated[str, Query(max_length=2000)],
+                    code: Annotated[str | None, Query(max_length=2000)] = None,
+                    error: Annotated[str | None, Query(max_length=200)] = None):
+    from .google_calendar import GoogleError
+
+    google = _google(request)
+    try:
+        redirect_uri = google.read_state(state, _user(request))
+    except (GoogleError, ValueError, KeyError):
+        raise HTTPException(400, "Неверная или устаревшая ссылка входа через Google")
+    home = redirect_uri.removesuffix("/v1/google/callback") + "/"
+    if error or not code:
+        return RedirectResponse(home + "?google=denied", status_code=302)
+    try:
+        google.connect(_user(request), code, redirect_uri)
+    except Exception as e:
+        log.warning("Подключение Google не удалось: %s", e)
+        return RedirectResponse(home + "?google=error", status_code=302)
+    return RedirectResponse(home + "?google=connected", status_code=302)
+
+
+@router.post("/google/disconnect", status_code=204, tags=["Google Calendar"])
+def google_disconnect(request: Request):
+    _google(request).disconnect(_user(request))
+    return Response(status_code=204)
+
+
 class SynthesizeRequest(BaseModel):
-    text: str = Field(min_length=1, max_length=2000)
+    text: str = Field(min_length=1, max_length=1000)
     voice: str = Field(default="alina", min_length=1, max_length=40)
 
 

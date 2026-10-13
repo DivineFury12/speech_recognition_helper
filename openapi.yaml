@@ -125,6 +125,128 @@ paths:
                 type: string
         '404':
           $ref: '#/components/responses/NotFound'
+  /v1/calendar/rotate:
+    post:
+      tags: [Calendar]
+      operationId: rotateCalendarLink
+      summary: Выпустить новую ссылку на календарь
+      description: Старая ссылка перестаёт работать. Нужна, если ссылка попала не в те руки.
+      x-implementation-status: implemented
+      x-requirement-level: additional
+      responses:
+        '200':
+          description: Новая ссылка
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [url]
+                properties:
+                  url:
+                    type: string
+  /v1/assistant/summary:
+    get:
+      tags: [Assistant]
+      operationId: getDailySummary
+      summary: Сводка на сегодня
+      description: Записи на сегодня и число невыполненных с прошлых дней.
+      x-implementation-status: implemented
+      x-requirement-level: additional
+      parameters:
+        - name: timezone
+          in: query
+          required: true
+          schema:
+            type: string
+            example: Europe/Moscow
+      responses:
+        '200':
+          description: Текст сводки и записи
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DailySummary'
+  /v1/status:
+    get:
+      tags: [System]
+      operationId: getServicesStatus
+      summary: Состояние сервисов
+      description: Что сейчас работает — понимание команд (GigaChat), распознавание, озвучка, Google Календарь.
+      x-implementation-status: implemented
+      x-requirement-level: additional
+      responses:
+        '200':
+          description: Список сервисов
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ServicesStatus'
+  /v1/google/status:
+    get:
+      tags: [Google Calendar]
+      operationId: getGoogleStatus
+      summary: Подключён ли Google Календарь
+      x-implementation-status: implemented
+      x-requirement-level: additional
+      responses:
+        '200':
+          description: Состояние подключения
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GoogleStatus'
+  /v1/google/connect:
+    get:
+      tags: [Google Calendar]
+      operationId: connectGoogle
+      summary: Начать вход через Google
+      description: Браузер переходит сюда сам; сервер перенаправляет на страницу согласия Google.
+      x-implementation-status: implemented
+      x-requirement-level: additional
+      parameters:
+        - name: origin
+          in: query
+          required: true
+          description: Адрес интерфейса, например http://127.0.0.1:8000. Должен быть в GOOGLE_ALLOWED_ORIGINS.
+          schema:
+            type: string
+      responses:
+        '302':
+          description: Перенаправление на Google
+  /v1/google/callback:
+    get:
+      tags: [Google Calendar]
+      operationId: googleCallback
+      summary: Возврат после входа через Google
+      x-implementation-status: implemented
+      x-requirement-level: additional
+      parameters:
+        - name: state
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: code
+          in: query
+          schema:
+            type: string
+        - name: error
+          in: query
+          schema:
+            type: string
+      responses:
+        '302':
+          description: Возврат в интерфейс с ?google=connected, denied или error
+  /v1/google/disconnect:
+    post:
+      tags: [Google Calendar]
+      operationId: disconnectGoogle
+      summary: Отключить Google Календарь
+      x-implementation-status: implemented
+      x-requirement-level: additional
+      responses:
+        '204':
+          description: Отключено, доступ отозван
   /health:
     get:
       tags: [System]
@@ -460,7 +582,7 @@ paths:
       operationId: listVoices
       summary: Голоса для озвучки ответов
       description: |
-        Голоса XTTS-v2: клоны по образцам из backend/voices и встроенный голос.
+        Голоса Silero TTS (русская модель, работает на процессоре).
         Пока модель загружается после старта сервера, loading = true.
       x-implementation-status: implemented
       x-requirement-level: additional
@@ -492,12 +614,12 @@ paths:
                 text:
                   type: string
                   minLength: 1
-                  maxLength: 2000
+                  maxLength: 1000
                   example: Напоминание на завтра, 10:00, создано.
                 voice:
                   type: string
                   default: alina
-                  example: nikita
+                  example: alina
       responses:
         '200':
           description: Аудио с ответом
@@ -627,6 +749,7 @@ components:
         text:
           type: string
           minLength: 1
+          maxLength: 1000
           example: Что у меня сегодня?
         timezone:
           type: string
@@ -663,6 +786,11 @@ components:
           description: Созданные или найденные записи; пустой список при уточнении.
           items:
             $ref: '#/components/schemas/Entry'
+        suggestions:
+          type: array
+          description: Короткие ответы для кнопок под сообщением («Да», «Нет», «Отмени последнее»).
+          items:
+            type: string
       example:
         conversation_id: 550e8400-e29b-41d4-a716-446655440000
         turn_id: 4e8d4cb6-bf66-453c-a92b-71c578889103
@@ -703,13 +831,52 @@ components:
       properties:
         id:
           type: string
-          example: nikita
+          example: alina
         name:
           type: string
-          example: Никита
+          example: Алина
         description:
           type: string
           example: мужской голос
+    DailySummary:
+      type: object
+      required: [assistant_text, entries]
+      properties:
+        assistant_text:
+          type: string
+        entries:
+          type: array
+          items:
+            $ref: '#/components/schemas/Entry'
+    ServiceState:
+      type: object
+      required: [name, state, detail]
+      properties:
+        name:
+          type: string
+          example: Понимание команд
+        state:
+          type: string
+          enum: [ok, loading, error, off]
+        detail:
+          type: string
+    ServicesStatus:
+      type: object
+      required: [services]
+      properties:
+        services:
+          type: array
+          items:
+            $ref: '#/components/schemas/ServiceState'
+    GoogleStatus:
+      type: object
+      required: [configured, connected]
+      properties:
+        configured:
+          type: boolean
+          description: Заданы ли GOOGLE_CLIENT_ID и GOOGLE_CLIENT_SECRET на сервере.
+        connected:
+          type: boolean
     VoiceList:
       type: object
       required: [available, loading, voices]

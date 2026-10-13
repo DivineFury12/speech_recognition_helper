@@ -26,8 +26,8 @@ def test_voices_and_synthesis(client):
     client.app.state.tts = FakeEngine()
     data = client.get("/v1/speech/voices").json()
     assert data["available"] is True
-    assert [v["name"] for v in data["voices"]] == ["Никита", "Сергей", "Алина"]
-    r = client.post("/v1/speech/synthesize", json={"text": "Готово", "voice": "sergey"})
+    assert [v["name"] for v in data["voices"]] == ["Алина", "Ксения", "Айдар", "Евгений"]
+    r = client.post("/v1/speech/synthesize", json={"text": "Готово", "voice": "aidar"})
     assert r.status_code == 200 and r.headers["content-type"] == "audio/wav"
     assert client.post("/v1/speech/synthesize", json={"text": "Готово", "voice": "alisa"}).status_code == 404
     client.app.state.tts = None

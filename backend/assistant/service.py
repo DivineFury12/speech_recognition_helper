@@ -83,6 +83,17 @@ def yes_no(text: str) -> str | None:
     return None
 
 
+UNDO_RE = re.compile(
+    r"^\s*(?:(?:отмени|откати|верни)(?:те)?\s+(?:последн\w*(?:\s+действие)?|это|как было|назад|обратно)"
+    r"|верни(?:те)?\s+(?:как было|обратно|назад)|отмена последнего(?:\s+действия)?)\s*[.!]*\s*$",
+    re.I,
+)
+UNDO_TEXT = "Отмени последнее"
+CHOICE_WORDS = ("Первую", "Вторую", "Третью", "Четвёртую", "Пятую")
+HELP_SUGGESTIONS = ["Что у меня сегодня?", "Поставь встречу завтра в 10", "Напомни купить молоко в 19:00"]
+UNDO_FIELDS = ("title", "date", "time", "timezone", "duration_minutes", "recurrence", "status")
+
+
 ORDINALS = {"перв": 1, "втор": 2, "трет": 3, "четв": 4, "пят": 5, "последн": -1}
 HELP_TEXT = (
     "Я умею создавать задачи, напоминания и встречи (в том числе повторяющиеся), показывать записи за период, "
@@ -175,7 +186,11 @@ class Assistant:
         ctx = Ctx(user_id, tz_name, now, cid)
 
         draft = self._load_draft(cid)
-        if draft and (CANCEL_RE.match(text) or (draft["type"] == "create" and _is_draft_cancel(text))):
+        if UNDO_RE.match(text):
+            if draft:
+                self.storage.delete_draft(cid)
+            result = self._undo(ctx)
+        elif draft and (CANCEL_RE.match(text) or (draft["type"] == "create" and _is_draft_cancel(text))):
             self.storage.delete_draft(cid)
             result = self._turn("Хорошо, отменил.", "no_action", draft.get("intent", "unknown"), [])
         elif draft and draft["type"] == "confirm":
@@ -191,10 +206,80 @@ class Assistant:
             result = self._dispatch(parsed, text, ctx, draft)
 
         focus = result.pop("focus", None)
-        if focus is not None:
-            self.storage.set_context(cid, {"focus": focus})
+        undo = result.pop("undo", None)
+        if focus is not None or undo is not None:
+            context = self.storage.get_context(cid)
+            if focus is not None:
+                context["focus"] = focus
+            if undo is not None:
+                context["undo"] = undo or None
+            self.storage.set_context(cid, context)
+        result["suggestions"] = self._suggestions(result, cid)
+        result.pop("undoable", None)
         self.storage.add_message(cid, "assistant", result["assistant_text"])
         return {"conversation_id": cid, "turn_id": str(uuid.uuid4()), "user_text": text, **result}
+
+    def _suggestions(self, result: dict, cid: str) -> list[str]:
+        if result["status"] == "needs_clarification":
+            draft = self.storage.get_draft(cid) or {}
+            if draft.get("type") == "confirm":
+                return ["Да", "Нет"]
+            if draft.get("type") == "choose":
+                return list(CHOICE_WORDS[:min(len(draft.get("candidates", [])), len(CHOICE_WORDS))]) + ["Отмена"]
+            return ["Отмена"]
+        if result["status"] == "completed" and result.get("undoable"):
+            entries = result.get("entries") or []
+            if result["intent"] == "create_entry" and entries and entries[0].get("time"):
+                return [UNDO_TEXT, "Перенеси на час позже"]
+            return [UNDO_TEXT]
+        if result["intent"] == "unknown" and result["assistant_text"] == HELP_TEXT:
+            return HELP_SUGGESTIONS
+        return []
+
+    def _undo(self, ctx: Ctx) -> dict[str, Any]:
+        record = self.storage.get_context(ctx.cid).get("undo")
+        if not record:
+            return self._turn("Отменять нечего: в этом диалоге я ещё ничего не менял.", "no_action", "unknown", [])
+        op, before = record["op"], record.get("before")
+        if op == "create":
+            entry = self.storage.get_entry(record["id"], ctx.user_id)
+            if entry is None or not self.storage.delete_entry(record["id"], ctx.user_id):
+                return {**self._turn("Этой записи уже нет, отменять нечего.", "no_action", "delete_entry", []), "undo": {}}
+            return {**self._turn(f"Отменил: убрал {KIND_ACC[entry['kind']]} «{entry['title']}».",
+                                 "completed", "delete_entry", [], []), "undo": {}}
+        if op == "delete":
+            restored = self.storage.restore_entry(before, ctx.user_id)
+            self._index([restored])
+            return {**self._turn(f"Вернул {KIND_ACC[restored['kind']]} «{restored['title']}», {_when(restored, ctx.today)}.",
+                                 "completed", "create_entry", [restored], [restored["id"]]), "undo": {}}
+        if self.storage.get_entry(before["id"], ctx.user_id) is None:
+            return {**self._turn("Этой записи уже нет, отменять нечего.", "no_action", "update_entry", []), "undo": {}}
+        restored = self.storage.update_entry(before["id"], {k: before.get(k) for k in UNDO_FIELDS}, ctx.user_id)
+        self._index([restored])
+        return {**self._turn(f"Вернул как было: {KIND_SHORT[restored['kind']]} «{restored['title']}», "
+                             f"{_when(restored, ctx.today)}.", "completed", "update_entry", [restored], [restored["id"]]),
+                "undo": {}}
+
+    @staticmethod
+    def _undoable(result: dict[str, Any], record: dict) -> dict[str, Any]:
+        return {**result, "undo": record, "undoable": True}
+
+    def summary(self, tz_name: str, user_id: str = DEFAULT_USER, now: datetime | None = None) -> dict[str, Any]:
+        tz = resolve_timezone(tz_name)
+        today = (now or datetime.now(tz)).astimezone(tz).date()
+        entries = [e for e in self.storage.list_entries(today.isoformat(), today.isoformat(), user_id=user_id)
+                   if e.get("status") != "completed"]
+        overdue = [e for e in self.storage.all_entries(None, user_id)
+                   if e.get("status") == "pending" and e.get("date") and not e.get("recurrence")
+                   and e["date"] < today.isoformat()]
+        if entries:
+            lines = [self._line(e, today, show_date=False) for e in entries]
+            text = f"Сегодня {len(entries)} {_plural(len(entries), None)}:\n" + "\n".join(lines)
+        else:
+            text = "На сегодня ничего не запланировано."
+        if overdue:
+            text += f"\nНе выполнено с прошлых дней: {len(overdue)} {_plural(len(overdue), None)}."
+        return {"assistant_text": text, "entries": entries}
 
     @staticmethod
     def _turn(text: str, status: str, intent: str, entries: list[dict[str, Any]],
@@ -333,7 +418,8 @@ class Assistant:
         )
         self._index([entry])
         text = f"Готово, создал {KIND_ACC[kind]}: «{entry['title']}», {_when(entry, ctx.today)}."
-        return self._turn(text, "completed", "create_entry", [entry], [entry["id"]])
+        return self._undoable(self._turn(text, "completed", "create_entry", [entry], [entry["id"]]),
+                              {"op": "create", "id": entry["id"]})
 
     def _index(self, entries: list[dict]) -> None:
         if self.index is None:
@@ -546,6 +632,7 @@ class Assistant:
             draft = {"type": "confirm", "action": "delete", "intent": "delete_entry", "entry_id": entry["id"]}
             return self._ask(ctx, draft, f"Удалить {_describe(entry, ctx.today, accusative=True)}?", [entry], [entry["id"]])
         self.storage.delete_draft(ctx.cid)
+        before = self.storage.get_entry(entry["id"], ctx.user_id) or entry
         if entry.get("recurrence") and entry.get("date"):
             start = date.fromisoformat(entry["date"])
             base = max(start, ctx.today)
@@ -555,10 +642,12 @@ class Assistant:
                                                   ctx.user_id)
                 text = (f"Отметил: {KIND_SHORT[moved['kind']]} «{moved['title']}» за {dates.format_date(base)}. "
                         f"Следующая — {dates.format_when(upcoming[0], None, ctx.today)}.")
-                return self._turn(text, "completed", "complete_entry", [moved], [moved["id"]])
+                return self._undoable(self._turn(text, "completed", "complete_entry", [moved], [moved["id"]]),
+                                      {"op": "update", "before": before})
         done = self.storage.update_entry(entry["id"], {"status": "completed"}, ctx.user_id)
-        return self._turn(f"Отметил выполненной: {KIND_SHORT[done['kind']]} «{done['title']}».",
-                          "completed", "complete_entry", [done], [done["id"]])
+        return self._undoable(self._turn(f"Отметил выполненной: {KIND_SHORT[done['kind']]} «{done['title']}».",
+                                         "completed", "complete_entry", [done], [done["id"]]),
+                              {"op": "update", "before": before})
 
     def _on_choose(self, text: str, draft: dict, ctx: Ctx) -> dict[str, Any]:
         candidates = [e for e in (self.storage.get_entry(i, ctx.user_id) for i in draft["candidates"]) if e]
@@ -616,6 +705,7 @@ class Assistant:
             return self._ask(ctx, draft, question, [conflict])
         self.storage.delete_draft(ctx.cid)
         updated = self.storage.update_entry(entry_id, changes, ctx.user_id)
+        record = {"op": "update", "before": entry}
         parts = []
         if {"date", "time", "recurrence"} & set(changes):
             parts.append(f"теперь {_when(updated, ctx.today)}")
@@ -626,14 +716,17 @@ class Assistant:
         else:
             head = f"Готово: {KIND_SHORT[updated['kind']]} «{updated['title']}»"
         text = head + (" — " + ", ".join(parts) if parts else "") + "."
-        return self._turn(text, "completed", "update_entry", [updated], [updated["id"]])
+        return self._undoable(self._turn(text, "completed", "update_entry", [updated], [updated["id"]]), record)
 
     def _commit_delete(self, entry_id: str, ctx: Ctx) -> dict[str, Any]:
         self.storage.delete_draft(ctx.cid)
         entry = self.storage.get_entry(entry_id, ctx.user_id)
         if entry is None or not self.storage.delete_entry(entry_id, ctx.user_id):
             return self._turn("Этой записи уже нет.", "no_action", "delete_entry", [])
-        return self._turn(f"Удалил {KIND_ACC[entry['kind']]} «{entry['title']}».", "completed", "delete_entry", [], [])
+        return self._undoable(
+            self._turn(f"Удалил {KIND_ACC[entry['kind']]} «{entry['title']}».",
+                       "completed", "delete_entry", [], []),
+            {"op": "delete", "before": entry})
 
     def _list(self, parsed: Parsed, ctx: Ctx) -> dict[str, Any]:
         start, end = dates.parse_period(parsed.period_phrase, ctx.today)

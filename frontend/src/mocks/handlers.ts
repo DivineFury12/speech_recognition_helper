@@ -59,7 +59,8 @@ function cleanTitle(text: string): string {
 }
 
 function turn(p: Omit<AssistantTurn, 'turn_id'>): AssistantTurn {
-  return { ...p, turn_id: crypto.randomUUID() }
+  const suggestions = p.status === 'completed' && p.intent === 'create_entry' ? ['Отмени последнее'] : []
+  return { suggestions, ...p, turn_id: crypto.randomUUID() }
 }
 
 function describe(e: Entry): string {
@@ -185,6 +186,24 @@ export const handlers = [
   http.get(`${API}/v1/entries/undated`, () => HttpResponse.json<EntryList>({ items: entries.filter((e) => !e.date) })),
 
   http.get(`${API}/v1/calendar`, () => HttpResponse.json({ url: `${location.origin}/v1/calendar/feed/mock.ics` })),
+  http.post(`${API}/v1/calendar/rotate`, () => HttpResponse.json({ url: `${location.origin}/v1/calendar/feed/mock2.ics` })),
+  http.get(`${API}/v1/google/status`, () => HttpResponse.json({ configured: false, connected: false })),
+  http.get(`${API}/v1/assistant/summary`, () => {
+    const todays = entries.filter((e) => e.date === isoDate(new Date()))
+    return HttpResponse.json({
+      assistant_text: todays.length ? `Сегодня записей: ${todays.length}.` : 'На сегодня ничего не запланировано.',
+      entries: todays,
+    })
+  }),
+  http.get(`${API}/v1/status`, () =>
+    HttpResponse.json({
+      services: [
+        { name: 'Понимание команд', state: 'off', detail: 'моки, без сервера' },
+        { name: 'Распознавание речи', state: 'off', detail: 'моки' },
+        { name: 'Озвучка', state: 'off', detail: 'только голос браузера' },
+      ],
+    }),
+  ),
 
   http.patch<{ id: string }, EntryUpdate, Entry | ErrorResponse>(`${API}/v1/entries/:id`, async ({ params, request }) => {
     const entry = entries.find((e) => e.id === params.id)

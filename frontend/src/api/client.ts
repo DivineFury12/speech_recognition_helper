@@ -1,11 +1,14 @@
 import type {
   AssistantTurn,
+  DailySummary,
   Entry,
   EntryList,
   EntryUpdate,
   ErrorResponse,
+  GoogleStatus,
   HealthResponse,
   ListEntriesQuery,
+  ServicesStatus,
   SessionInfo,
   TextMessageRequest,
   VoiceList,
@@ -131,6 +134,30 @@ export function listVoices(): Promise<VoiceList> {
 export async function synthesize(text: string, voice: string): Promise<Blob> {
   const res = await send('/v1/speech/synthesize', json('POST', { text, voice }), 90_000)
   return res.blob()
+}
+
+export function getDailySummary(timezone: string): Promise<DailySummary> {
+  return request(`/v1/assistant/summary?${new URLSearchParams({ timezone })}`)
+}
+
+export function getServicesStatus(): Promise<ServicesStatus> {
+  return request('/v1/status', {}, 5_000)
+}
+
+export function rotateCalendarLink(): Promise<{ url: string }> {
+  return request('/v1/calendar/rotate', { method: 'POST' })
+}
+
+export function getGoogleStatus(): Promise<GoogleStatus> {
+  return request('/v1/google/status')
+}
+
+export function googleConnectUrl(): string {
+  return `${BASE_URL}/v1/google/connect?${new URLSearchParams({ origin: window.location.origin })}`
+}
+
+export async function disconnectGoogle(): Promise<void> {
+  await send('/v1/google/disconnect', { method: 'POST' })
 }
 
 export function getHealth(): Promise<HealthResponse> {

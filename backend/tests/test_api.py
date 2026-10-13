@@ -13,7 +13,8 @@ def test_text_message_contract(client):
     r = client.post("/v1/assistant/messages", json={"text": "Добавь задачу купить хлеб", "timezone": TZ})
     assert r.status_code == 200
     body = r.json()
-    assert set(body) == {"conversation_id", "turn_id", "user_text", "assistant_text", "status", "intent", "entries"}
+    assert set(body) == {"conversation_id", "turn_id", "user_text", "assistant_text", "status", "intent", "entries",
+                         "suggestions"}
     uuid.UUID(body["conversation_id"])
     assert body["entries"][0]["title"] == "Купить хлеб"
 
@@ -186,3 +187,53 @@ def test_session_reports_voice_mode(client):
         assert client.get("/v1/session").json()["voice_enabled"] is False
     finally:
         client.app.state.voice_enabled = True
+
+
+def test_security_headers_and_body_limit(client):
+    r = client.get("/v1/session")
+    assert r.headers["x-frame-options"] == "DENY" and "frame-ancestors 'none'" in r.headers["content-security-policy"]
+    assert r.headers["cache-control"] == "no-store"
+    big = client.post("/v1/assistant/messages", content=b"x", headers={"Content-Length": str(50 * 1024 * 1024)})
+    assert big.status_code == 413
+    long = client.post("/v1/assistant/messages", json={"text": "а" * 1001, "timezone": TZ})
+    assert long.status_code == 422
+
+
+def test_access_code_lockout(client):
+    sessions = client.app.state.sessions
+    sessions.access_code = "секрет-123"
+    try:
+        for _ in range(5):
+            assert client.post("/v1/session/unlock", json={"code": "нет"}).status_code == 401
+        assert client.post("/v1/session/unlock", json={"code": "секрет-123"}).status_code == 429
+    finally:
+        sessions.access_code = ""
+        client.app.state.unlock_lockout._fails.clear()
+
+
+def test_calendar_link_rotation(client):
+    old = client.get("/v1/calendar").json()["url"]
+    new = client.post("/v1/calendar/rotate").json()["url"]
+    assert old != new
+    path = lambda u: "/" + u.split("://", 1)[1].split("/", 1)[1]
+    assert _new_client().get(path(old)).status_code == 404
+    assert _new_client().get(path(new)).status_code == 200
+
+
+def test_status_summary_and_google_off(client):
+    names = [s["name"] for s in client.get("/v1/status").json()["services"]]
+    assert names[:3] == ["Понимание команд", "Распознавание речи", "Озвучка"]
+    assert "ничего" in client.get("/v1/assistant/summary", params={"timezone": TZ}).json()["assistant_text"]
+    assert client.get("/v1/google/status").json() == {"configured": False, "connected": False}
+    assert client.get("/v1/google/connect", params={"origin": "http://x"}).status_code == 503
+
+
+def test_access_log_redacts_secrets():
+    import logging
+
+    from app import RedactSecrets
+
+    record = logging.LogRecord("uvicorn.access", logging.INFO, "", 0, '%s - "%s %s HTTP/%s" %d', (
+        "127.0.0.1", "GET", "/v1/google/callback?code=SECRET&state=x", "1.1", 302), None)
+    RedactSecrets().filter(record)
+    assert "SECRET" not in record.getMessage()

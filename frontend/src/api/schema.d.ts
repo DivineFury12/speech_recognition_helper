@@ -95,6 +95,137 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/calendar/rotate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Выпустить новую ссылку на календарь
+         * @description Старая ссылка перестаёт работать. Нужна, если ссылка попала не в те руки.
+         */
+        post: operations["rotateCalendarLink"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/assistant/summary": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Сводка на сегодня
+         * @description Записи на сегодня и число невыполненных с прошлых дней.
+         */
+        get: operations["getDailySummary"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/status": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Состояние сервисов
+         * @description Что сейчас работает — понимание команд (GigaChat), распознавание, озвучка, Google Календарь.
+         */
+        get: operations["getServicesStatus"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/google/status": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Подключён ли Google Календарь */
+        get: operations["getGoogleStatus"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/google/connect": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Начать вход через Google
+         * @description Браузер переходит сюда сам; сервер перенаправляет на страницу согласия Google.
+         */
+        get: operations["connectGoogle"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/google/callback": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Возврат после входа через Google */
+        get: operations["googleCallback"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/google/disconnect": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Отключить Google Календарь */
+        post: operations["disconnectGoogle"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/health": {
         parameters: {
             query?: never;
@@ -290,7 +421,7 @@ export interface paths {
         };
         /**
          * Голоса для озвучки ответов
-         * @description Голоса XTTS-v2: клоны по образцам из backend/voices и встроенный голос.
+         * @description Голоса Silero TTS (русская модель, работает на процессоре).
          *     Пока модель загружается после старта сервера, loading = true.
          */
         get: operations["listVoices"];
@@ -398,6 +529,8 @@ export interface components {
             intent: "create_entry" | "list_entries" | "search_entries" | "update_entry" | "delete_entry" | "complete_entry" | "unknown";
             /** @description Созданные или найденные записи; пустой список при уточнении. */
             entries: components["schemas"]["Entry"][];
+            /** @description Короткие ответы для кнопок под сообщением («Да», «Нет», «Отмени последнее»). */
+            suggestions?: string[];
         };
         ConversationMessage: {
             /** Format: uuid */
@@ -418,12 +551,31 @@ export interface components {
          */
         Recurrence: "daily" | "weekdays" | "weekly" | "monthly" | null;
         VoiceInfo: {
-            /** @example nikita */
+            /** @example alina */
             id: string;
-            /** @example Никита */
+            /** @example Алина */
             name: string;
             /** @example мужской голос */
             description: string;
+        };
+        DailySummary: {
+            assistant_text: string;
+            entries: components["schemas"]["Entry"][];
+        };
+        ServiceState: {
+            /** @example Понимание команд */
+            name: string;
+            /** @enum {string} */
+            state: "ok" | "loading" | "error" | "off";
+            detail: string;
+        };
+        ServicesStatus: {
+            services: components["schemas"]["ServiceState"][];
+        };
+        GoogleStatus: {
+            /** @description Заданы ли GOOGLE_CLIENT_ID и GOOGLE_CLIENT_SECRET на сервере. */
+            configured: boolean;
+            connected: boolean;
         };
         VoiceList: {
             available: boolean;
@@ -672,6 +824,151 @@ export interface operations {
                 };
             };
             404: components["responses"]["NotFound"];
+        };
+    };
+    rotateCalendarLink: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Новая ссылка */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        url: string;
+                    };
+                };
+            };
+        };
+    };
+    getDailySummary: {
+        parameters: {
+            query: {
+                timezone: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Текст сводки и записи */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DailySummary"];
+                };
+            };
+        };
+    };
+    getServicesStatus: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Список сервисов */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ServicesStatus"];
+                };
+            };
+        };
+    };
+    getGoogleStatus: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Состояние подключения */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["GoogleStatus"];
+                };
+            };
+        };
+    };
+    connectGoogle: {
+        parameters: {
+            query: {
+                /** @description Адрес интерфейса, например http://127.0.0.1:8000. Должен быть в GOOGLE_ALLOWED_ORIGINS. */
+                origin: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Перенаправление на Google */
+            302: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    googleCallback: {
+        parameters: {
+            query: {
+                state: string;
+                code?: string;
+                error?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Возврат в интерфейс с ?google=connected, denied или error */
+            302: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    disconnectGoogle: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Отключено, доступ отозван */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     getHealth: {
@@ -1027,7 +1324,7 @@ export interface operations {
                     text: string;
                     /**
                      * @default alina
-                     * @example nikita
+                     * @example alina
                      */
                     voice?: string;
                 };

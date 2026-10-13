@@ -45,11 +45,11 @@ if (-not (Test-Path (Join-Path $frontend "node_modules"))) {
     Push-Location $frontend; npm install; Pop-Location
 }
 
-$xtts = Join-Path $backend ".cache\tts\xtts_v2\model.pth"
-if (-not $NoVoice -and -not (Test-Path $xtts)) {
-    & $python -c "import torch, TTS" 2>$null
+$silero = Join-Path $backend ".cache\tts\silero\v4_ru.pt"
+if (-not $NoVoice -and -not (Test-Path $silero)) {
+    & $python -c "import torch" 2>$null
     if ($LASTEXITCODE -eq 0) {
-        Step "Скачиваю модели озвучки и поиска по смыслу (около 2,5 ГБ, только при первом запуске)"
+        Step "Скачиваю модели озвучки и поиска по смыслу (около 1 ГБ, только при первом запуске)"
         Push-Location $backend
         & $python -m assistant.models_download
         Pop-Location

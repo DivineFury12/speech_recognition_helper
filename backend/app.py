@@ -13,11 +13,12 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from assistant.api import router as assistant_router
-from assistant.auth import RateLimiter, SessionMiddleware, Sessions, load_secret
+from assistant.auth import Lockout, RateLimiter, SessionMiddleware, Sessions, load_secret
 from assistant.config import get_settings
 from assistant.embeddings import EmbeddingIndex, create_embedding_model
 from assistant.tts import create_engine as create_tts_engine
 from assistant.llm import LLMError, create_provider
+from assistant.llm.base import TrackedProvider
 from assistant.service import Assistant
 from assistant.storage import Storage
 
@@ -27,11 +28,41 @@ GIGAAM_CACHE = os.getenv(
     "GIGAAM_CACHE",
     "/cache/gigaam" if os.path.isdir("/cache") else os.path.join(os.path.dirname(os.path.abspath(__file__)), ".cache", "gigaam"),
 )
-MAX_UPLOAD_BYTES = 10 * 1024 * 1024
+MAX_UPLOAD_BYTES = 5 * 1024 * 1024
+MAX_BODY_BYTES = 6 * 1024 * 1024
+SECURITY_HEADERS = {
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
+    "Referrer-Policy": "same-origin",
+    "Permissions-Policy": "microphone=(self), camera=(), geolocation=()",
+    "Content-Security-Policy": (
+        "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; "
+        "media-src 'self' blob:; connect-src 'self'; font-src 'self' data:; frame-ancestors 'none'; "
+        "base-uri 'self'; form-action 'self'; object-src 'none'"
+    ),
+}
 ml = {}
 infer_lock = threading.Lock()
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"), format="%(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("app")
+
+
+class RedactSecrets(logging.Filter):
+    """Убирает из журнала запросов одноразовый код Google и токен ссылки на календарь."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        args = record.args
+        if isinstance(args, tuple) and len(args) >= 3 and isinstance(args[2], str):
+            path = args[2]
+            if path.startswith("/v1/google/callback"):
+                path = "/v1/google/callback?…"
+            elif path.startswith("/v1/calendar/feed/"):
+                path = "/v1/calendar/feed/…"
+            record.args = (*args[:2], path, *args[3:])
+        return True
+
+
+logging.getLogger("uvicorn.access").addFilter(RedactSecrets())
 settings = get_settings()
 
 
@@ -95,6 +126,7 @@ async def lifespan(app: FastAPI):
     storage = Storage(settings.db_path)
     try:
         llm = create_provider(settings)
+        llm = TrackedProvider(llm) if llm is not None else None
     except LLMError as e:
         log.error("LLM недоступна, работаем на правилах: %s", e)
         llm = None
@@ -111,11 +143,18 @@ async def lifespan(app: FastAPI):
         index = EmbeddingIndex(storage, model)
         threading.Thread(target=_warm_up, args=(model,), daemon=True).start()
     log.info("Embeddings: %s", model.name if model else "нет (поиск по словам и через LLM)")
-    tts = create_tts_engine(settings.tts_enabled, settings.tts_model_dir, settings.voices_dir, settings.tts_device)
+    tts = create_tts_engine(settings.tts_enabled, settings.tts_model_dir, settings.tts_device)
     app.state.tts = tts
     if tts is not None:
         threading.Thread(target=tts.load, daemon=True).start()
-        log.info("Озвучка: загружаю XTTS в фоне (голоса: %s)", ", ".join(v.name for v in tts.voices()))
+        log.info("Озвучка: загружаю Silero в фоне (голоса: %s)", ", ".join(v.name for v in tts.voices()))
+    app.state.google = None
+    if settings.google_client_id and settings.google_client_secret:
+        from assistant.google_calendar import GoogleCalendar
+
+        app.state.google = GoogleCalendar(storage, sessions.secret, settings.google_client_id,
+                                          settings.google_client_secret)
+        log.info("Google Календарь: настроен")
     app.state.assistant = Assistant(storage, llm, index)
     app.state.llm_name = llm.name if llm else "rules"
     app.state.transcribe_upload = transcribe_upload
@@ -132,6 +171,9 @@ app = FastAPI(title="Голосовой ассистент для задач и 
 app.state.sessions = sessions
 app.state.assistant_limiter = RateLimiter(settings.rate_limit_per_minute, 60)
 app.state.unlock_limiter = RateLimiter(10, 600)
+app.state.unlock_lockout = Lockout(5, 900)
+app.state.google = None
+app.state.google_origins = settings.google_origins
 app.state.tts_limiter = RateLimiter(60, 60)
 app.state.tts = None
 app.state.voice_enabled = settings.voice_enabled
@@ -147,6 +189,19 @@ if settings.cors_origins:
         allow_headers=["*"],
     )
 app.include_router(assistant_router)
+
+
+@app.middleware("http")
+async def security_headers(request: Request, call_next):
+    length = request.headers.get("content-length")
+    if length and length.isdigit() and int(length) > MAX_BODY_BYTES:
+        return JSONResponse(status_code=413, content={"detail": "Слишком большой запрос"})
+    response = await call_next(request)
+    for name, value in SECURITY_HEADERS.items():
+        response.headers.setdefault(name, value)
+    if request.url.path.startswith("/v1/"):
+        response.headers.setdefault("Cache-Control", "no-store")
+    return response
 
 
 @app.exception_handler(RequestValidationError)
@@ -218,7 +273,10 @@ def transcribe(file: UploadFile = File(...)):
 def transcribe_longform(file: UploadFile = File(...)):
     require_asr()
     with tempfile.TemporaryDirectory() as tmp:
-        wav = prepare(file.file.read(), file.filename, tmp)
+        data = file.file.read(MAX_UPLOAD_BYTES * 4 + 1)
+        if len(data) > MAX_UPLOAD_BYTES * 4:
+            raise HTTPException(413, "Аудиофайл слишком большой")
+        wav = prepare(data, file.filename, tmp)
         try:
             with infer_lock:
                 result = ml["model"].transcribe_longform(wav, fr_batch_size=1)

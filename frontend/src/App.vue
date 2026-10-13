@@ -6,7 +6,10 @@ import EntriesPanel from './components/EntriesPanel.vue'
 import HelpTip from './components/HelpTip.vue'
 import AccessGate from './components/AccessGate.vue'
 import VoicePicker from './components/VoicePicker.vue'
-import { downloadCalendar, getHealth } from './api/client'
+import CalendarMenu from './components/CalendarMenu.vue'
+import { getHealth, getServicesStatus } from './api/client'
+import type { ServiceState } from './api/types'
+import { useChatStore } from './stores/chat'
 import { useEntriesStore } from './stores/entries'
 import { useSessionStore } from './stores/session'
 import { useSpeech } from './composables/useSpeech'
@@ -19,10 +22,12 @@ const session = useSessionStore()
 const { loaded, unlocked, voiceEnabled } = storeToRefs(session)
 const entries = useEntriesStore()
 
-const health = ref<'unknown' | 'ok' | 'down'>('unknown')
-const healthTitle = ref('Проверяю сервер…')
+const health = ref<'unknown' | 'ok' | 'warn' | 'down'>('unknown')
+const services = ref<ServiceState[]>([])
+const statusOpen = ref(false)
+const statusEl = ref<HTMLElement | null>(null)
 const toast = ref<string | null>(null)
-const exporting = ref(false)
+const chat = useChatStore()
 let timer: number | undefined
 let toastTimer: number | undefined
 
@@ -41,33 +46,47 @@ watch(speechNotice, (text) => {
 
 async function checkHealth() {
   try {
-    const h = await getHealth()
-    health.value = 'ok'
-    healthTitle.value = `Сервер работает: ${h.model} на ${h.device}`
+    await getHealth()
   } catch {
     health.value = 'down'
-    healthTitle.value = 'Нет связи с сервером'
+    services.value = []
+    return
+  }
+  try {
+    services.value = (await getServicesStatus()).services
+    health.value = services.value.some((s) => s.state === 'error') ? 'warn' : 'ok'
+  } catch {
+    health.value = 'ok'
   }
 }
 
-async function exportCalendar() {
-  if (exporting.value) return
-  exporting.value = true
-  try {
-    const blob = await downloadCalendar()
-    const href = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = href
-    a.download = 'assistant.ics'
-    a.click()
-    URL.revokeObjectURL(href)
-    notify('Файл assistant.ics скачан — откройте его, чтобы добавить записи в календарь')
-  } catch (e) {
-    notify(e instanceof Error ? e.message : 'Не удалось выгрузить календарь')
-  } finally {
-    exporting.value = false
-  }
+const statusLabel = () => (health.value === 'down' ? 'нет связи' : health.value === 'warn' ? 'есть проблемы' : 'онлайн')
+
+function onDocumentClick(e: MouseEvent) {
+  if (statusOpen.value && statusEl.value && !statusEl.value.contains(e.target as Node)) statusOpen.value = false
 }
+
+function readGoogleResult() {
+  const params = new URLSearchParams(window.location.search)
+  const result = params.get('google')
+  if (!result) return
+  const text: Record<string, string> = {
+    connected: 'Google Календарь подключён — записи появятся в календаре «Ассистент»',
+    denied: 'Подключение Google Календаря отменено',
+    error: 'Не удалось подключить Google Календарь, попробуйте ещё раз',
+  }
+  notify(text[result] ?? 'Google Календарь: неизвестный ответ')
+  params.delete('google')
+  const query = params.toString()
+  window.history.replaceState(null, '', window.location.pathname + (query ? `?${query}` : ''))
+}
+
+watch([loaded, unlocked], ([isLoaded, isUnlocked]) => {
+  if (isLoaded && isUnlocked) {
+    void chat.showDailySummary()
+    void checkHealth()
+  }
+})
 
 function onVisible() {
   if (document.visibilityState === 'visible') {
@@ -79,13 +98,16 @@ function onVisible() {
 onMounted(() => {
   void session.load()
   void checkHealth()
+  readGoogleResult()
   timer = window.setInterval(checkHealth, HEALTH_INTERVAL_MS)
   document.addEventListener('visibilitychange', onVisible)
+  document.addEventListener('click', onDocumentClick)
 })
 onBeforeUnmount(() => {
   window.clearInterval(timer)
   window.clearTimeout(toastTimer)
   document.removeEventListener('visibilitychange', onVisible)
+  document.removeEventListener('click', onDocumentClick)
 })
 </script>
 
@@ -99,23 +121,31 @@ onBeforeUnmount(() => {
       <div class="meta">
         <span v-if="mocks" class="badge">моки</span>
         <VoicePicker v-if="voiceEnabled" />
-        <button
-          v-if="unlocked && loaded"
-          type="button"
-          class="icon-action"
-          :disabled="exporting"
-          title="Скачать записи для календаря (.ics)"
-          aria-label="Скачать записи для календаря"
-          @click="exportCalendar"
-        >
-          <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
-            <path fill="currentColor" d="M19 4h-1V2h-2v2H8V2H6v2H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2Zm0 16H5V9h14v11ZM7 11h5v5H7v-5Z" />
-          </svg>
-        </button>
-        <span class="status" :class="health" :title="healthTitle">
-          <span class="status-dot" aria-hidden="true" />
-          <span class="status-label">{{ health === 'down' ? 'нет связи' : 'онлайн' }}</span>
-        </span>
+        <CalendarMenu v-if="unlocked && loaded" @notify="notify" />
+        <div ref="statusEl" class="status-wrap">
+          <button
+            type="button"
+            class="status"
+            :class="health"
+            :aria-expanded="statusOpen"
+            title="Состояние сервисов"
+            @click.stop="statusOpen = !statusOpen; statusOpen && checkHealth()"
+          >
+            <span class="status-dot" aria-hidden="true" />
+            <span class="status-label">{{ statusLabel() }}</span>
+          </button>
+          <div v-show="statusOpen" class="menu status-menu" role="dialog" aria-label="Состояние сервисов">
+            <div class="menu-title">Состояние сервисов</div>
+            <p v-if="health === 'down'" class="service-row">
+              <span class="service-dot error" />
+              <span><b>Сервер</b><br /><small>нет связи — проверьте, что backend запущен</small></span>
+            </p>
+            <p v-for="s in services" :key="s.name" class="service-row">
+              <span class="service-dot" :class="s.state" />
+              <span><b>{{ s.name }}</b><br /><small>{{ s.detail }}</small></span>
+            </p>
+          </div>
+        </div>
         <span class="tz" title="Часовой пояс">{{ timezone }}</span>
       </div>
     </header>

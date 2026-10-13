@@ -160,3 +160,33 @@ def test_unclear_confirm_reply_keeps_question(say):
 def test_bare_yes_without_question(say):
     turn = say("да")
     assert "ничего не спрашивал" in turn["assistant_text"]
+
+
+def test_undo_create_update_delete(say):
+    created = say("Поставь встречу с командой завтра в 10")
+    assert created["suggestions"][0] == "Отмени последнее"
+    assert "Отменил" in say("Отмени последнее")["assistant_text"]
+    assert say.a.storage.all_entries() == []
+    say("Поставь встречу с командой завтра в 10")
+    say("Перенеси её на 12")
+    assert say("Верни как было")["entries"][0]["time"] == "10:00"
+    say("Удали встречу с командой")
+    say("да")
+    assert say.a.storage.all_entries() == []
+    back = say("Отмени последнее")
+    assert back["entries"][0]["title"] == "Встреча с командой"
+    assert "нечего" in say("Отмени последнее")["assistant_text"]
+
+
+def test_suggestions_for_confirm_and_help(say):
+    say("Поставь встречу с командой завтра в 10")
+    assert say("Удали встречу с командой")["suggestions"] == ["Да", "Нет"]
+    assert say("Нет")["suggestions"] == []
+    assert "Что у меня сегодня?" in say("абракадабра")["suggestions"]
+
+
+def test_daily_summary(say):
+    assert say.a.summary(TZ, now=NOW)["assistant_text"] == "На сегодня ничего не запланировано."
+    say("Поставь встречу с командой сегодня в 15:00")
+    text = say.a.summary(TZ, now=NOW)["assistant_text"]
+    assert text.startswith("Сегодня 1 запись") and "Встреча с командой" in text

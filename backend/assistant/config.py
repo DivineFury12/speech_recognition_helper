@@ -66,14 +66,20 @@ class Settings:
         )
     )
     tts_enabled: bool = field(default_factory=lambda: _bool("VOICE_ENABLED", True) and _bool("TTS_ENABLED", True))
-    tts_device: str = field(default_factory=lambda: os.getenv("TTS_DEVICE", "auto"))
+    tts_device: str = field(default_factory=lambda: os.getenv("TTS_DEVICE", "cpu"))
     tts_model_dir: str = field(
         default_factory=lambda: os.getenv(
             "TTS_MODEL_DIR",
-            "/cache/tts/xtts_v2" if os.path.isdir("/cache") else str(BACKEND_DIR / ".cache" / "tts" / "xtts_v2"),
+            "/cache/tts/silero" if os.path.isdir("/cache") else str(BACKEND_DIR / ".cache" / "tts" / "silero"),
         )
     )
-    voices_dir: str = field(default_factory=lambda: os.getenv("VOICES_DIR", str(BACKEND_DIR / "voices")))
+    google_client_id: str = field(default_factory=lambda: os.getenv("GOOGLE_CLIENT_ID", "").strip())
+    google_client_secret: str = field(default_factory=lambda: os.getenv("GOOGLE_CLIENT_SECRET", "").strip())
+    google_origins: list[str] = field(
+        default_factory=lambda: [o.strip().rstrip("/") for o in os.getenv(
+            "GOOGLE_ALLOWED_ORIGINS", "http://127.0.0.1:8000,http://localhost:8000,http://127.0.0.1:5173,http://localhost:5173"
+        ).split(",") if o.strip()]
+    )
     frontend_dist: str = field(
         default_factory=lambda: os.getenv("FRONTEND_DIST", str(BACKEND_DIR.parent / "frontend" / "dist"))
     )

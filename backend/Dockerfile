@@ -4,7 +4,10 @@ ENV PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
     HF_HOME=/cache/hf \
     XDG_CACHE_HOME=/cache \
-    DB_PATH=/data/assistant.db
+    DB_PATH=/data/assistant.db \
+    COQUI_TOS_AGREED=1 \
+    TTS_MODEL_DIR=/models/xtts_v2 \
+    EMBEDDING_CACHE=/models/embeddings
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ffmpeg git \
@@ -19,6 +22,8 @@ RUN python -m pip install --break-system-packages -r requirements.txt \
 COPY app.py ml.py ./
 COPY assistant ./assistant
 COPY certs ./certs
+COPY voices ./voices
+RUN python -m assistant.models_download
 
 EXPOSE 8000
 CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000"]

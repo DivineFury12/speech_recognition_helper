@@ -3,8 +3,10 @@ __pycache__
 .git
 *.wav
 *.mp3
+!voices/*.wav
 .venv
 .env
+.cache
 data
 tests
 .pytest_cache

@@ -15,6 +15,8 @@ from fastapi.staticfiles import StaticFiles
 from assistant.api import router as assistant_router
 from assistant.auth import RateLimiter, SessionMiddleware, Sessions, load_secret
 from assistant.config import get_settings
+from assistant.embeddings import EmbeddingIndex, create_embedding_model
+from assistant.tts import create_engine as create_tts_engine
 from assistant.llm import LLMError, create_provider
 from assistant.service import Assistant
 from assistant.storage import Storage
@@ -71,6 +73,14 @@ def load_asr():
     ml["device"] = str(next(ml["model"].parameters()).device)
 
 
+def _warm_up(model) -> None:
+    try:
+        model.load()
+        log.info("Модель эмбеддингов %s загружена", model.name)
+    except Exception as e:
+        log.warning("Модель эмбеддингов не загрузилась, поиск будет без неё: %s", e)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     if settings.asr_enabled:
@@ -89,7 +99,22 @@ async def lifespan(app: FastAPI):
     log.info("LLM provider: %s", llm.name if llm else "rules")
     if sessions.access_code:
         log.info("Включён код доступа (ACCESS_CODE)")
-    app.state.assistant = Assistant(storage, llm)
+    index = None
+    try:
+        model = create_embedding_model(settings.embedding_model, settings.embedding_cache)
+    except ValueError as e:
+        log.error("%s — поиск по смыслу через эмбеддинги отключён", e)
+        model = None
+    if model is not None:
+        index = EmbeddingIndex(storage, model)
+        threading.Thread(target=_warm_up, args=(model,), daemon=True).start()
+    log.info("Embeddings: %s", model.name if model else "нет (поиск по словам и через LLM)")
+    tts = create_tts_engine(settings.tts_enabled, settings.tts_model_dir, settings.voices_dir, settings.tts_device)
+    app.state.tts = tts
+    if tts is not None:
+        threading.Thread(target=tts.load, daemon=True).start()
+        log.info("Озвучка: загружаю XTTS в фоне (голоса: %s)", ", ".join(v.name for v in tts.voices()))
+    app.state.assistant = Assistant(storage, llm, index)
     app.state.llm_name = llm.name if llm else "rules"
     app.state.transcribe_upload = transcribe_upload
     yield
@@ -105,6 +130,8 @@ app = FastAPI(title="Голосовой ассистент для задач и 
 app.state.sessions = sessions
 app.state.assistant_limiter = RateLimiter(settings.rate_limit_per_minute, 60)
 app.state.unlock_limiter = RateLimiter(10, 600)
+app.state.tts_limiter = RateLimiter(60, 60)
+app.state.tts = None
 app.state.asr_ready = lambda: "model" in ml and FFMPEG is not None
 app.state.llm_name = "rules"
 app.add_middleware(SessionMiddleware, sessions=sessions, cookie_secure=settings.cookie_secure)

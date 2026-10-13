@@ -281,6 +281,27 @@ export interface paths {
         patch: operations["updateEntry"];
         trace?: never;
     };
+    "/v1/speech/voices": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Голоса для озвучки ответов
+         * @description Голоса XTTS-v2: клоны по образцам из backend/voices и встроенный голос.
+         *     Пока модель загружается после старта сервера, loading = true.
+         */
+        get: operations["listVoices"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/speech/synthesize": {
         parameters: {
             query?: never;
@@ -291,8 +312,9 @@ export interface paths {
         get?: never;
         put?: never;
         /**
-         * Озвучить текст ответа ассистента
-         * @description Не реализовано на сервере (501); фронтенд озвучивает ответы через Web Speech API браузера.
+         * Озвучить текст ответа ассистента выбранным голосом
+         * @description Даты, время и числа перед синтезом переводятся в слова. Ответ — WAV 24 кГц.
+         *     Если озвучка отключена или ещё загружается — 503, фронтенд читает ответ голосом браузера.
          */
         post: operations["synthesizeSpeech"];
         delete?: never;
@@ -395,6 +417,19 @@ export interface components {
          * @enum {string|null}
          */
         Recurrence: "daily" | "weekdays" | "weekly" | "monthly" | null;
+        VoiceInfo: {
+            /** @example nikita */
+            id: string;
+            /** @example Никита */
+            name: string;
+            /** @example мужской голос */
+            description: string;
+        };
+        VoiceList: {
+            available: boolean;
+            loading: boolean;
+            voices: components["schemas"]["VoiceInfo"][];
+        };
         SessionInfo: {
             /** Format: uuid */
             user_id: string;
@@ -956,6 +991,26 @@ export interface operations {
             422: components["responses"]["ValidationError"];
         };
     };
+    listVoices: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Список голосов */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["VoiceList"];
+                };
+            };
+        };
+    };
     synthesizeSpeech: {
         parameters: {
             query?: never;
@@ -968,6 +1023,11 @@ export interface operations {
                 "application/json": {
                     /** @example Напоминание на завтра, 10:00, создано. */
                     text: string;
+                    /**
+                     * @default alina
+                     * @example nikita
+                     */
+                    voice?: string;
                 };
             };
         };
@@ -978,10 +1038,20 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "audio/mpeg": string;
+                    "audio/wav": string;
                 };
             };
+            404: components["responses"]["NotFound"];
             422: components["responses"]["ValidationError"];
+            /** @description Озвучка отключена или ещё загружается */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
         };
     };
 }

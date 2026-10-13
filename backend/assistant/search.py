@@ -69,11 +69,15 @@ def semantic(query: str, entries: list[dict[str, Any]], llm: LLMProvider) -> lis
 
 
 def search_entries(query: str, entries: list[dict[str, Any]], limit: int = 10,
-                   llm: LLMProvider | None = None) -> list[dict[str, Any]]:
+                   llm: LLMProvider | None = None, index=None, user_id: str | None = None) -> list[dict[str, Any]]:
     ranked = lexical(query, entries)
-    if ranked and ranked[0][0] >= 1.0 or llm is None or not stems(query):
+    if ranked and ranked[0][0] >= 1.0 or not stems(query):
         return [e for _, e in ranked[:limit]]
-    found = semantic(query, entries, llm)
+    found: list[dict[str, Any]] = []
+    if index is not None and user_id is not None:
+        found = [e for _, e in index.rank(query, entries, user_id)]
+    if not found and llm is not None:
+        found = semantic(query, entries, llm)
     ids = {e["id"] for e in found}
     found += [e for _, e in ranked if e["id"] not in ids]
     return found[:limit]

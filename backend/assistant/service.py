@@ -99,9 +99,10 @@ def _as_title(text: str) -> str | None:
 
 
 class Assistant:
-    def __init__(self, storage: Storage, llm: LLMProvider | None) -> None:
+    def __init__(self, storage: Storage, llm: LLMProvider | None, index=None) -> None:
         self.storage = storage
         self.llm = llm
+        self.index = index
 
     def handle(self, text: str, tz_name: str, conversation_id: str | None = None,
                now: datetime | None = None, user_id: str = DEFAULT_USER) -> dict[str, Any]:
@@ -226,6 +227,14 @@ class Assistant:
         if kind == "meeting":
             fields.setdefault("duration_minutes", 60)
             fields["duration_minutes"] = fields["duration_minutes"] or 60
+        duplicate = self.storage.find_duplicate(
+            kind=kind, title=fields["title"], date=fields.get("date"), time=fields.get("time"),
+            recurrence=fields.get("recurrence"), user_id=ctx.user_id,
+        )
+        if duplicate:
+            self.storage.delete_draft(ctx.cid)
+            return self._turn(f"Такая запись уже есть: {_describe(duplicate, ctx.today)}.",
+                              "completed", "create_entry", [duplicate], [duplicate["id"]])
         conflict = None if force else self._conflict(fields, ctx.user_id)
         if conflict:
             draft = {"type": "confirm", "action": "create", "intent": "create_entry", "fields": fields}
@@ -243,8 +252,17 @@ class Assistant:
             recurrence=fields.get("recurrence"),
             user_id=ctx.user_id,
         )
+        self._index([entry])
         text = f"Готово, создал {KIND_ACC[kind]}: «{entry['title']}», {_when(entry, ctx.today)}."
         return self._turn(text, "completed", "create_entry", [entry], [entry["id"]])
+
+    def _index(self, entries: list[dict]) -> None:
+        if self.index is None:
+            return
+        try:
+            self.index.index(entries)
+        except Exception as e:
+            log.warning("Не удалось проиндексировать запись: %s", e)
 
     def _conflict(self, fields: dict, user_id: str, exclude_id: str | None = None) -> dict | None:
         if fields.get("kind") != "meeting" or not fields.get("date") or not fields.get("time"):
@@ -321,6 +339,10 @@ class Assistant:
         if ranked:
             best = ranked[0][0]
             return [e for s, e in ranked if s == best][: MAX_CHOICES + 1]
+        if self.index is not None:
+            hits = [e for _, e in self.index.rank(parsed.target, pool, ctx.user_id)]
+            if hits:
+                return hits[: MAX_CHOICES + 1]
         return semantic(parsed.target, pool, self.llm)[: MAX_CHOICES + 1] if self.llm else []
 
     def _changes(self, parsed: Parsed, ctx: Ctx) -> dict[str, Any]:
@@ -440,9 +462,10 @@ class Assistant:
     def _search(self, parsed: Parsed, text: str, ctx: Ctx) -> dict[str, Any]:
         query = parsed.query or text
         pool = self.storage.all_entries(parsed.kind, ctx.user_id)
-        entries = search_entries(query, pool, llm=self.llm)
+        entries = search_entries(query, pool, llm=self.llm, index=self.index, user_id=ctx.user_id)
         if not entries and parsed.kind:
-            entries = search_entries(query, self.storage.all_entries(None, ctx.user_id), llm=self.llm)
+            entries = search_entries(query, self.storage.all_entries(None, ctx.user_id), llm=self.llm,
+                                     index=self.index, user_id=ctx.user_id)
         if not entries:
             return self._turn(f"Не нашёл ничего похожего на «{query}».", "completed", "search_entries", [], [])
         lines = [self._line(e, ctx.today, show_date=True) for e in entries]

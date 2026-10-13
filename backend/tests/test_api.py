@@ -98,8 +98,9 @@ def test_audio_bad_conversation_id(client):
     assert r.status_code == 422
 
 
-def test_tts_not_implemented(client):
-    assert client.post("/v1/speech/synthesize", json={"text": "привет"}).status_code == 501
+def test_tts_disabled_is_503(client):
+    assert client.post("/v1/speech/synthesize", json={"text": "привет"}).status_code == 503
+    assert client.get("/v1/speech/voices").json() == {"available": False, "loading": False, "voices": []}
 
 
 def test_unknown_conversation_404(client):

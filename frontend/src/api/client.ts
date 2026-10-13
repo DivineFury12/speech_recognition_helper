@@ -8,6 +8,7 @@ import type {
   ListEntriesQuery,
   SessionInfo,
   TextMessageRequest,
+  VoiceList,
 } from './types'
 
 const BASE_URL = (import.meta.env.VITE_API_URL ?? '').replace(/\/+$/, '')
@@ -120,6 +121,15 @@ export function getCalendarLink(): Promise<{ url: string }> {
 export async function downloadCalendar(): Promise<Blob> {
   const { url } = await getCalendarLink()
   const res = await send(new URL(url).pathname)
+  return res.blob()
+}
+
+export function listVoices(): Promise<VoiceList> {
+  return request('/v1/speech/voices', {}, 5_000)
+}
+
+export async function synthesize(text: string, voice: string): Promise<Blob> {
+  const res = await send('/v1/speech/synthesize', json('POST', { text, voice }), 90_000)
   return res.blob()
 }
 

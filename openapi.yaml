@@ -454,13 +454,32 @@ paths:
           description: Запись удалена
         '404':
           $ref: '#/components/responses/NotFound'
+  /v1/speech/voices:
+    get:
+      tags: [Speech synthesis]
+      operationId: listVoices
+      summary: Голоса для озвучки ответов
+      description: |
+        Голоса XTTS-v2: клоны по образцам из backend/voices и встроенный голос.
+        Пока модель загружается после старта сервера, loading = true.
+      x-implementation-status: implemented
+      x-requirement-level: additional
+      responses:
+        '200':
+          description: Список голосов
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VoiceList'
   /v1/speech/synthesize:
     post:
       tags: [Speech synthesis]
       operationId: synthesizeSpeech
-      summary: Озвучить текст ответа ассистента
-      description: Не реализовано на сервере (501); фронтенд озвучивает ответы через Web Speech API браузера.
-      x-implementation-status: planned
+      summary: Озвучить текст ответа ассистента выбранным голосом
+      description: |
+        Даты, время и числа перед синтезом переводятся в слова. Ответ — WAV 24 кГц.
+        Если озвучка отключена или ещё загружается — 503, фронтенд читает ответ голосом браузера.
+      x-implementation-status: implemented
       x-requirement-level: additional
       requestBody:
         required: true
@@ -473,17 +492,30 @@ paths:
                 text:
                   type: string
                   minLength: 1
+                  maxLength: 2000
                   example: Напоминание на завтра, 10:00, создано.
+                voice:
+                  type: string
+                  default: alina
+                  example: nikita
       responses:
         '200':
           description: Аудио с ответом
           content:
-            audio/mpeg:
+            audio/wav:
               schema:
                 type: string
                 format: binary
+        '404':
+          $ref: '#/components/responses/NotFound'
         '422':
           $ref: '#/components/responses/ValidationError'
+        '503':
+          description: Озвучка отключена или ещё загружается
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
 components:
   parameters:
     ConversationId:
@@ -665,6 +697,31 @@ components:
       nullable: true
       enum: [daily, weekdays, weekly, monthly, null]
       description: Повтор записи; null — разовая.
+    VoiceInfo:
+      type: object
+      required: [id, name, description]
+      properties:
+        id:
+          type: string
+          example: nikita
+        name:
+          type: string
+          example: Никита
+        description:
+          type: string
+          example: мужской голос
+    VoiceList:
+      type: object
+      required: [available, loading, voices]
+      properties:
+        available:
+          type: boolean
+        loading:
+          type: boolean
+        voices:
+          type: array
+          items:
+            $ref: '#/components/schemas/VoiceInfo'
     SessionInfo:
       type: object
       required: [user_id, access_code_required, unlocked, llm_provider, asr_enabled]

@@ -3,6 +3,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { storeToRefs } from 'pinia'
 import { useChatStore } from '@/stores/chat'
 import { MAX_RECORD_SECONDS, useRecorder } from '@/composables/useRecorder'
+import { stopSpeech } from '@/composables/useSpeech'
 import EntryItem from './EntryItem.vue'
 
 const chat = useChatStore()
@@ -35,6 +36,7 @@ function primary() {
     draft.value = ''
     return
   }
+  stopSpeech()
   void recorder.start()
 }
 

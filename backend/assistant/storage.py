@@ -1,5 +1,6 @@
 import json
 import sqlite3
+from array import array
 import threading
 import uuid
 from datetime import date, datetime, timedelta, timezone
@@ -41,6 +42,14 @@ CREATE TABLE IF NOT EXISTS messages (
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS messages_conversation ON messages(conversation_id, created_at);
+
+CREATE TABLE IF NOT EXISTS entry_embeddings (
+    entry_id TEXT NOT NULL REFERENCES entries(id) ON DELETE CASCADE,
+    model TEXT NOT NULL,
+    title TEXT NOT NULL,
+    vector BLOB NOT NULL,
+    PRIMARY KEY (entry_id, model)
+);
 
 CREATE TABLE IF NOT EXISTS drafts (
     conversation_id TEXT PRIMARY KEY REFERENCES conversations(id) ON DELETE CASCADE,
@@ -163,6 +172,41 @@ class Storage:
             args.append(kind)
         sql += " ORDER BY created_at DESC"
         return [self._entry(r) for r in self._fetchall(sql, args)]
+
+    def find_duplicate(self, *, kind: str, title: str, date: str | None, time: str | None,
+                       recurrence: str | None, user_id: str = DEFAULT_USER) -> dict[str, Any] | None:
+        normalized = " ".join(title.casefold().split())
+        rows = self._fetchall(
+            "SELECT * FROM entries WHERE user_id = ? AND kind = ? AND status = 'pending'"
+            " AND date IS ? AND time IS ? AND recurrence IS ?",
+            (user_id, kind, date, time, recurrence),
+        )
+        for row in rows:
+            if " ".join(row["title"].casefold().split()) == normalized:
+                return self._entry(row)
+        return None
+
+    def save_embedding(self, entry_id: str, model: str, title: str, vector: list[float]) -> None:
+        blob = array("f", vector).tobytes()
+        with self._lock, self._db:
+            self._db.execute(
+                "INSERT INTO entry_embeddings (entry_id, model, title, vector) VALUES (?, ?, ?, ?)"
+                " ON CONFLICT(entry_id, model) DO UPDATE SET title = excluded.title, vector = excluded.vector",
+                (entry_id, model, title, blob),
+            )
+
+    def get_embeddings(self, user_id: str, model: str) -> dict[str, tuple[str, list[float]]]:
+        rows = self._fetchall(
+            "SELECT x.entry_id, x.title, x.vector FROM entry_embeddings x JOIN entries e ON e.id = x.entry_id"
+            " WHERE e.user_id = ? AND x.model = ?",
+            (user_id, model),
+        )
+        result = {}
+        for r in rows:
+            vec = array("f")
+            vec.frombytes(r["vector"])
+            result[r["entry_id"]] = (r["title"], vec.tolist())
+        return result
 
     def update_entry(self, entry_id: str, changes: dict[str, Any],
                      user_id: str = DEFAULT_USER) -> dict[str, Any] | None:

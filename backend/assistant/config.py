@@ -56,6 +56,22 @@ class Settings:
     session_secret: str = field(default_factory=lambda: os.getenv("SESSION_SECRET", ""))
     cookie_secure: bool = field(default_factory=lambda: _bool("COOKIE_SECURE", False))
     rate_limit_per_minute: int = field(default_factory=lambda: int(os.getenv("RATE_LIMIT_PER_MINUTE", "30")))
+    embedding_model: str = field(default_factory=lambda: os.getenv("EMBEDDING_MODEL", "e5"))
+    embedding_cache: str = field(
+        default_factory=lambda: os.getenv(
+            "EMBEDDING_CACHE",
+            "/cache/embeddings" if os.path.isdir("/cache") else str(BACKEND_DIR / ".cache" / "embeddings"),
+        )
+    )
+    tts_enabled: bool = field(default_factory=lambda: _bool("TTS_ENABLED", True))
+    tts_device: str = field(default_factory=lambda: os.getenv("TTS_DEVICE", "auto"))
+    tts_model_dir: str = field(
+        default_factory=lambda: os.getenv(
+            "TTS_MODEL_DIR",
+            "/cache/tts/xtts_v2" if os.path.isdir("/cache") else str(BACKEND_DIR / ".cache" / "tts" / "xtts_v2"),
+        )
+    )
+    voices_dir: str = field(default_factory=lambda: os.getenv("VOICES_DIR", str(BACKEND_DIR / "voices")))
     frontend_dist: str = field(
         default_factory=lambda: os.getenv("FRONTEND_DIST", str(BACKEND_DIR.parent / "frontend" / "dist"))
     )

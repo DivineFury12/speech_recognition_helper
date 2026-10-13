@@ -5,10 +5,10 @@ import ChatPanel from './components/ChatPanel.vue'
 import EntriesPanel from './components/EntriesPanel.vue'
 import HelpTip from './components/HelpTip.vue'
 import AccessGate from './components/AccessGate.vue'
+import VoicePicker from './components/VoicePicker.vue'
 import { downloadCalendar, getHealth } from './api/client'
 import { useEntriesStore } from './stores/entries'
 import { useSessionStore } from './stores/session'
-import { useSpeech } from './composables/useSpeech'
 import { timezone } from './utils/time'
 
 const mocks = import.meta.env.VITE_USE_MOCKS === 'true'
@@ -17,7 +17,6 @@ const HEALTH_INTERVAL_MS = 30_000
 const session = useSessionStore()
 const { loaded, unlocked } = storeToRefs(session)
 const entries = useEntriesStore()
-const { supported: ttsSupported, enabled: ttsEnabled } = useSpeech()
 
 const health = ref<'unknown' | 'ok' | 'down'>('unknown')
 const healthTitle = ref('Проверяю сервер…')
@@ -91,23 +90,7 @@ onBeforeUnmount(() => {
       </div>
       <div class="meta">
         <span v-if="mocks" class="badge">моки</span>
-        <button
-          v-if="ttsSupported"
-          type="button"
-          class="icon-action"
-          :class="{ active: ttsEnabled }"
-          :aria-pressed="ttsEnabled"
-          :title="ttsEnabled ? 'Озвучка ответов включена' : 'Озвучка ответов выключена'"
-          :aria-label="ttsEnabled ? 'Выключить озвучку ответов' : 'Включить озвучку ответов'"
-          @click="ttsEnabled = !ttsEnabled"
-        >
-          <svg v-if="ttsEnabled" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
-            <path fill="currentColor" d="M3 9v6h4l5 5V4L7 9H3Zm13.5 3A4.5 4.5 0 0 0 14 8v8a4.47 4.47 0 0 0 2.5-4ZM14 3.23v2.06a7 7 0 0 1 0 13.42v2.06A9 9 0 0 0 14 3.23Z" />
-          </svg>
-          <svg v-else viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
-            <path fill="currentColor" d="M16.5 12A4.5 4.5 0 0 0 14 8v2.18l2.45 2.45c.03-.2.05-.41.05-.63ZM19 12c0 .94-.2 1.82-.54 2.64l1.51 1.51A8.8 8.8 0 0 0 21 12a9 9 0 0 0-7-8.77v2.06A7 7 0 0 1 19 12ZM4.27 3 3 4.27 7.73 9H3v6h4l5 5v-6.73l4.25 4.25c-.67.52-1.42.93-2.25 1.18v2.06a9 9 0 0 0 3.69-1.81L19.73 21 21 19.73l-9-9L4.27 3ZM12 4 9.91 6.09 12 8.18V4Z" />
-          </svg>
-        </button>
+        <VoicePicker />
         <button
           v-if="unlocked && loaded"
           type="button"

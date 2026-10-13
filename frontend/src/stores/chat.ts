@@ -27,7 +27,7 @@ interface Persisted {
 
 function load(): Persisted {
   try {
-    const raw = sessionStorage.getItem(STORAGE_KEY)
+    const raw = localStorage.getItem(STORAGE_KEY) ?? sessionStorage.getItem(STORAGE_KEY)
     if (raw) {
       const p = JSON.parse(raw) as Persisted
       if (Array.isArray(p.messages)) {
@@ -62,7 +62,7 @@ export const useChatStore = defineStore('chat', () => {
           conversationId: conversationId.value,
           awaiting: awaiting.value,
         }
-        sessionStorage.setItem(STORAGE_KEY, JSON.stringify(data))
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(data))
       } catch {}
     },
     { deep: true },

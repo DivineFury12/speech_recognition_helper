@@ -11,6 +11,8 @@ os.environ["DB_PATH"] = ":memory:"
 os.environ["ACCESS_CODE"] = ""
 os.environ["RATE_LIMIT_PER_MINUTE"] = "0"
 os.environ["FRONTEND_DIST"] = ""
+os.environ["EMBEDDING_MODEL"] = "none"
+os.environ["TTS_ENABLED"] = "false"
 
 
 @pytest.fixture()

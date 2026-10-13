@@ -283,7 +283,10 @@ def search_entries(request: Request, q: Annotated[str, Query(min_length=1, max_l
     from .search import search_entries as rank
 
     assistant = _assistant(request)
-    return {"items": rank(q, assistant.storage.all_entries(kind, _user(request)), llm=assistant.llm)}
+    user_id = _user(request)
+    items = rank(q, assistant.storage.all_entries(kind, user_id), llm=assistant.llm,
+                 index=assistant.index, user_id=user_id)
+    return {"items": items}
 
 
 @router.get("/entries/{entry_id}", response_model=Entry, response_model_exclude_unset=True, tags=["Entries"])
@@ -337,9 +340,48 @@ def calendar_feed(token: str, request: Request):
 
 
 class SynthesizeRequest(BaseModel):
-    text: str = Field(min_length=1)
+    text: str = Field(min_length=1, max_length=2000)
+    voice: str = Field(default="alina", min_length=1, max_length=40)
 
 
-@router.post("/speech/synthesize", tags=["Speech synthesis"])
-def synthesize_speech(body: SynthesizeRequest):
-    raise HTTPException(501, "Озвучивание выполняется в браузере (Web Speech API), серверный синтез не подключён")
+class VoiceInfo(BaseModel):
+    id: str
+    name: str
+    description: str
+
+
+class VoiceList(BaseModel):
+    available: bool
+    loading: bool
+    voices: list[VoiceInfo]
+
+
+@router.get("/speech/voices", response_model=VoiceList, tags=["Speech synthesis"])
+def list_voices(request: Request):
+    engine = request.app.state.tts
+    if engine is None:
+        return {"available": False, "loading": False, "voices": []}
+    voices = [{"id": v.id, "name": v.name, "description": v.description} for v in engine.voices()]
+    return {"available": engine.ready, "loading": not engine.ready and engine.error is None, "voices": voices}
+
+
+@router.post("/speech/synthesize", tags=["Speech synthesis"],
+             responses={200: {"content": {"audio/wav": {}}, "description": "Ответ, озвученный выбранным голосом"}})
+def synthesize_speech(body: SynthesizeRequest, request: Request):
+    from .tts import TTSUnavailableError
+
+    engine = request.app.state.tts
+    if engine is None:
+        raise HTTPException(503, "Озвучка на сервере отключена")
+    limiter = getattr(request.app.state, "tts_limiter", None)
+    if limiter and not limiter.allow(_user(request)):
+        raise HTTPException(429, "Слишком много запросов на озвучку, подождите минуту")
+    try:
+        audio = engine.synthesize(body.text, body.voice)
+    except KeyError:
+        raise HTTPException(404, f"Нет голоса «{body.voice}»")
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+    except TTSUnavailableError as e:
+        raise HTTPException(503, str(e))
+    return Response(content=audio, media_type="audio/wav", headers={"Cache-Control": "private, max-age=3600"})

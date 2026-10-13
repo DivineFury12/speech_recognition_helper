@@ -198,4 +198,10 @@ export const handlers = [
     entries.splice(i, 1)
     return new HttpResponse(null, { status: 204 })
   }),
+
+  http.get(`${API}/v1/speech/voices`, () =>
+    HttpResponse.json({ available: false, loading: false, voices: [] }),
+  ),
+
+  http.post(`${API}/v1/speech/synthesize`, () => err(503, 'В режиме моков озвучка только в браузере')),
 ]

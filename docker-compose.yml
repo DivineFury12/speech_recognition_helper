@@ -1,0 +1,31 @@
+services:
+  assistant:
+    build:
+      context: .
+      target: gpu
+    image: speech-assistant:gpu
+    ports:
+      - "8000:8000"
+    env_file:
+      - path: backend/.env
+        required: false
+    environment:
+      - DB_PATH=/data/assistant.db
+      - FRONTEND_DIST=/app/frontend
+      - ACCESS_CODE=${ACCESS_CODE:-}
+      - COOKIE_SECURE=${COOKIE_SECURE:-false}
+      - GIGAAM_DEVICE=cuda
+      - TTS_DEVICE=cuda
+    volumes:
+      - assistant-data:/data
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped
+
+volumes:
+  assistant-data:

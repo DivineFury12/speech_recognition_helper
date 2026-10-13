@@ -1,0 +1,24 @@
+services:
+  assistant:
+    build:
+      context: .
+      target: lite
+    image: speech-assistant:lite
+    ports:
+      - "8000:8000"
+    env_file:
+      - path: backend/.env
+        required: false
+    environment:
+      - DB_PATH=/data/assistant.db
+      - FRONTEND_DIST=/app/frontend
+      - ACCESS_CODE=${ACCESS_CODE:-}
+      - COOKIE_SECURE=${COOKIE_SECURE:-false}
+      - VOICE_ENABLED=false
+      - EMBEDDING_MODEL=none
+    volumes:
+      - assistant-data:/data
+    restart: unless-stopped
+
+volumes:
+  assistant-data:

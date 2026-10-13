@@ -1,0 +1,13 @@
+.git
+**/node_modules
+**/.venv
+**/__pycache__
+**/*.pyc
+**/.pytest_cache
+backend/.cache
+backend/data
+backend/.env
+backend/tests
+frontend/dist
+frontend/.env.local
+*.pdf

@@ -1,10 +1,12 @@
 """Скачивает веса моделей заранее, чтобы сервер стартовал без интернета.
 
-Запуск: python -m assistant.models_download [--tts] [--embeddings]
+Запуск: python -m assistant.models_download [--tts] [--embeddings] [--asr]
 """
 
 import argparse
+import os
 import sys
+from pathlib import Path
 
 from .config import get_settings
 
@@ -38,17 +40,32 @@ def download_embeddings(name: str, cache: str) -> None:
     print(f"Эмбеддинги: {model.name} — готово")
 
 
+def download_asr() -> None:
+    try:
+        import gigaam
+    except ImportError:
+        print("GigaAM не установлен — пропускаю модель распознавания")
+        return
+    name = os.getenv("GIGAAM_MODEL", "v3_e2e_rnnt")
+    cache = os.getenv("GIGAAM_CACHE") or str(Path(__file__).resolve().parents[1] / ".cache" / "gigaam")
+    gigaam.load_model(name, device="cpu", download_root=cache)
+    print(f"GigaAM: {name} — готово")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--tts", action="store_true", help="только модель озвучки")
     parser.add_argument("--embeddings", action="store_true", help="только модель эмбеддингов")
+    parser.add_argument("--asr", action="store_true", help="только модель распознавания речи")
     args = parser.parse_args()
-    both = not args.tts and not args.embeddings
+    both = not args.tts and not args.embeddings and not args.asr
     settings = get_settings()
     if args.tts or both:
         download_xtts(settings.tts_model_dir)
     if args.embeddings or both:
         download_embeddings(settings.embedding_model, settings.embedding_cache)
+    if args.asr or both:
+        download_asr()
     return 0
 
 

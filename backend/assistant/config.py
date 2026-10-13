@@ -26,7 +26,8 @@ def _bool(name: str, default: bool) -> bool:
 
 
 def _credentials() -> str:
-    return os.getenv("GIGACHAT_CREDENTIALS") or os.getenv("GIGAKEY", "")
+    value = os.getenv("GIGACHAT_CREDENTIALS") or os.getenv("GIGAKEY", "")
+    return value.strip().strip('"').strip("'").strip()
 
 
 def _ca_bundle() -> str:

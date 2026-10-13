@@ -8,16 +8,25 @@ from src.schemas.assistant import Entry, EntryKind, EntryStatus
 
 
 class EntryRepository(typing.Protocol):
+    def get(self, entry_id: uuid.UUID) -> Entry | None: ...
+
+    def update(
+        self, entry_id: uuid.UUID, changes: dict, *, embedding: list[float] | None,
+        embedding_model: str | None,
+    ) -> Entry | None: ...
+
+    def delete(self, entry_id: uuid.UUID) -> bool: ...
+
     def create(
         self, *, kind: EntryKind, title: str, date: datetime.date | None,
         time: str | None, timezone: str, embedding: list[float] | None,
-        embedding_model: str | None,
+        embedding_model: str | None, duration_minutes: int | None = None,
     ) -> Entry: ...
 
     def create_once(
         self, *, kind: EntryKind, title: str, date: datetime.date | None,
         time: str | None, timezone: str, embedding: list[float] | None,
-        embedding_model: str | None,
+        embedding_model: str | None, duration_minutes: int | None = None,
     ) -> tuple[Entry, bool]: ...
 
     def list_period(
@@ -32,6 +41,7 @@ class EntryRepository(typing.Protocol):
     def search_similar(
         self, embedding: list[float], *, embedding_model: str,
         kind: EntryKind | None = None, limit: int = 5,
+        min_similarity: float = 0.0,
     ) -> list[Entry]: ...
 
     def list_unindexed(self, embedding_model: str, *, limit: int = 100) -> list[tuple[uuid.UUID, str]]: ...

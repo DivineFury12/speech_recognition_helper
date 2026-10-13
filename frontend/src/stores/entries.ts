@@ -16,7 +16,7 @@ export const useEntriesStore = defineStore('entries', () => {
   async function refresh() {
     const now = new Date()
     const date_from = isoDate(now)
-    const date_to = period.value === 'today' ? date_from : isoDate(addDays(now, 6))
+    const date_to = period.value === 'today' ? date_from : isoDate(addDays(now, 7))
     const id = ++reqId
     loading.value = true
     error.value = null

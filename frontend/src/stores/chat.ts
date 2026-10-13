@@ -62,14 +62,22 @@ export const useChatStore = defineStore('chat', () => {
   async function run(
     user: Pick<ChatMessage, 'text' | 'voice'>,
     call: (conversation_id?: string) => Promise<AssistantTurn>,
-    retry: () => void,
+    previousUserId?: string,
+    originalConversationId?: string | null,
   ) {
-    const userId = localId()
-    messages.value.push({ id: userId, role: 'user', ...user, pending: !!user.voice })
+    const userId = previousUserId ?? localId()
+    const requestConversationId = originalConversationId === undefined
+      ? conversationId.value : originalConversationId
+    if (!previousUserId) messages.value.push({ id: userId, role: 'user', ...user, pending: !!user.voice })
+    else {
+      messages.value = messages.value.filter((message) => message.role !== 'error')
+      const existing = messages.value.find((message) => message.id === userId)
+      if (existing) existing.pending = !!user.voice
+    }
     sending.value = true
     retryLast.value = null
     try {
-      const turn = await call(conversationId.value ?? undefined)
+      const turn = await call(requestConversationId ?? undefined)
       const m = messages.value.find((x) => x.id === userId)
       if (m) {
         if (turn.user_text) m.text = turn.user_text
@@ -91,7 +99,7 @@ export const useChatStore = defineStore('chat', () => {
         if (m.voice) m.text = 'Голосовое сообщение (не отправлено)'
       }
       messages.value.push({ id: localId(), role: 'error', text: e instanceof Error ? e.message : 'Неизвестная ошибка' })
-      retryLast.value = retry
+      retryLast.value = () => { void run(user, call, userId, requestConversationId) }
     } finally {
       sending.value = false
       void useEntriesStore().refresh()
@@ -101,15 +109,18 @@ export const useChatStore = defineStore('chat', () => {
   function sendText(text: string) {
     const t = text.trim()
     if (!t || sending.value) return
-    return run({ text: t }, (conversation_id) => sendTextMessage({ text: t, timezone, conversation_id }), () => sendText(t))
+    const request_id = crypto.randomUUID()
+    return run({ text: t }, (conversation_id) => sendTextMessage({
+      text: t, timezone, conversation_id, request_id,
+    }))
   }
 
   function sendAudio(file: Blob, filename: string) {
     if (sending.value) return
+    const request_id = crypto.randomUUID()
     return run(
       { text: 'Распознаю голосовое…', voice: true },
-      (conversation_id) => sendAudioMessage({ file, filename, timezone, conversation_id }),
-      () => sendAudio(file, filename),
+      (conversation_id) => sendAudioMessage({ file, filename, timezone, conversation_id, request_id }),
     )
   }
 

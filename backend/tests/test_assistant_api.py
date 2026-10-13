@@ -12,8 +12,9 @@ class FakeAssistant:
     def __init__(self):
         self.calls = []
 
-    def handle_message(self, text, timezone, conversation_id):
-        self.calls.append((text, timezone, conversation_id))
+    def handle_message(self, text, timezone, conversation_id, request_id=None,
+                       request_fingerprint=None):
+        self.calls.append((text, timezone, conversation_id, request_id, request_fingerprint))
         return {
             'conversation_id': conversation_id or uuid4(),
             'turn_id': uuid4(),
@@ -64,10 +65,22 @@ class AssistantApiTests(unittest.TestCase):
         })
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(assistant.calls, [
-            ('Что у меня сегодня?', 'Europe/Moscow', conversation_id),
-        ])
+        self.assertEqual(len(assistant.calls), 1)
+        self.assertEqual(assistant.calls[0][:3],
+                         ('Что у меня сегодня?', 'Europe/Moscow', conversation_id))
+        self.assertIsInstance(assistant.calls[0][3], type(conversation_id))
         self.assertEqual(response.json()['user_text'], 'Что у меня сегодня?')
+
+    def test_text_request_id_is_forwarded_for_retries(self):
+        assistant = FakeAssistant()
+        self.app.state.assistant_service = assistant
+        request_id = uuid4()
+        response = self.client.post('/v1/assistant/messages', json={
+            'text': 'Создай задачу', 'timezone': 'Europe/Moscow',
+            'request_id': str(request_id),
+        })
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(assistant.calls[0][3], request_id)
 
     def test_audio_route_uses_asr_then_same_service(self):
         assistant = FakeAssistant()
@@ -81,7 +94,8 @@ class AssistantApiTests(unittest.TestCase):
         )
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(assistant.calls, [('Напомни завтра', 'Europe/Moscow', None)])
+        self.assertEqual(assistant.calls[0][:3], ('Напомни завтра', 'Europe/Moscow', None))
+        self.assertIsNotNone(assistant.calls[0][4])
         self.assertEqual(response.json()['user_text'], 'Напомни завтра')
 
     def test_blank_text_is_rejected(self):

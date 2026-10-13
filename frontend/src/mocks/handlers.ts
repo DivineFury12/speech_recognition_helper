@@ -15,7 +15,7 @@ const entries: Entry[] = [
   mkEntry('reminder', 'Оплатить интернет', isoDate(addDays(today, 4)), '09:00'),
 ]
 
-const drafts = new Map<string, { kind: Kind; title: string; date: string; tz: string }>()
+const drafts = new Map<string, { kind: Kind; title: string; date: string; tz: string; duration: number | null }>()
 
 function mkEntry(kind: Kind, title: string, date: string | null, time: string | null, duration: number | null = null, tz = tzDefault): Entry {
   return {
@@ -46,12 +46,20 @@ function parseDate(text: string, tz: string): string {
   return isoDate(now, tz)
 }
 
+function parseDuration(text: string): number | null {
+  if (/на\s+полчаса/i.test(text)) return 30
+  const match = text.match(/на\s+(\d+)\s*(минут(?:у|ы)?|час(?:а|ов)?)/i)
+  if (!match) return null
+  return Number(match[1]) * (match[2].startsWith('час') ? 60 : 1)
+}
+
 function cleanTitle(text: string): string {
   const t = text
     .replace(/^(напомни( мне)?|поставь|создай|добавь|запланируй)\s*/i, '')
     .replace(/(встречу|задачу|напоминание)\s*/i, '')
     .replace(/(послезавтра|завтра|сегодня)/gi, '')
     .replace(/в\s*\d{1,2}([:.]\d{2})?(\s*(утра|дня|вечера))?/gi, '')
+    .replace(/на\s+(?:\d+\s*(?:минут(?:у|ы)?|час(?:а|ов)?)|полчаса)/gi, '')
     .replace(/\s+/g, ' ')
     .trim()
   return t ? t[0].toUpperCase() + t.slice(1) : 'Без названия'
@@ -76,7 +84,7 @@ function handle(text: string, tz: string, conversationId: string | undefined): A
       return turn({ ...base, assistant_text: 'Не понял время. Назовите, например, «в 15:00».', status: 'needs_clarification', intent: 'create_entry', entries: [] })
     }
     drafts.delete(cid)
-    const e = mkEntry(draft.kind, draft.title, draft.date, time, null, draft.tz)
+    const e = mkEntry(draft.kind, draft.title, draft.date, time, draft.duration, draft.tz)
     entries.push(e)
     return turn({ ...base, assistant_text: `Готово: ${describe(e)}.`, status: 'completed', intent: 'create_entry', entries: [e] })
   }
@@ -111,11 +119,12 @@ function handle(text: string, tz: string, conversationId: string | undefined): A
     const title = cleanTitle(text)
     const date = parseDate(text, tz)
     const time = parseTime(text)
+    const duration = kind === 'meeting' ? parseDuration(text) : null
     if (kind !== 'task' && !time) {
-      drafts.set(cid, { kind, title, date, tz })
+      drafts.set(cid, { kind, title, date, tz, duration })
       return turn({ ...base, assistant_text: kind === 'meeting' ? 'На какое время поставить встречу?' : 'Во сколько напомнить?', status: 'needs_clarification', intent: 'create_entry', entries: [] })
     }
-    const e = mkEntry(kind, title, date, time, null, tz)
+    const e = mkEntry(kind, title, date, time, duration, tz)
     entries.push(e)
     return turn({ ...base, assistant_text: `Создал: ${describe(e)}.`, status: 'completed', intent: 'create_entry', entries: [e] })
   }

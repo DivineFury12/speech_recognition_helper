@@ -10,6 +10,7 @@ import src.adapters.gigachat
 import src.adapters.local_embeddings
 import src.adapters.entry_repository
 import src.adapters.conversation_repository
+import src.adapters.assistant_request_repository
 import src.api.assistant.router
 import src.api.conversations.router
 import src.api.entries.router
@@ -80,6 +81,9 @@ def create_app(settings: src.settings.Settings | None = None) -> fastapi.FastAPI
                 src.services.command_extractor.ExternalCommandExtractor(gigachat_client),
                 app.state.entries_service,
                 app.state.conversations,
+                src.adapters.assistant_request_repository.SqlAlchemyAssistantRequestRepository(
+                    sessions,
+                ) if config.database_url is not None else None,
             )
 
         try:
@@ -147,6 +151,13 @@ def create_app(settings: src.settings.Settings | None = None) -> fastapi.FastAPI
         exc: src.services.assistant.InvalidTimezoneError,
     ) -> fastapi.responses.JSONResponse:
         return fastapi.responses.JSONResponse(status_code=422, content={'detail': str(exc)})
+
+    @app.exception_handler(src.adapters.assistant_request_repository.RequestIdConflictError)
+    async def handle_request_id_conflict(
+        request: fastapi.Request,
+        exc: src.adapters.assistant_request_repository.RequestIdConflictError,
+    ) -> fastapi.responses.JSONResponse:
+        return fastapi.responses.JSONResponse(status_code=409, content={'detail': str(exc)})
 
     @app.exception_handler(src.adapters.gigachat.GigaChatAPIError)
     @app.exception_handler(src.services.command_extractor.InvalidModelResponseError)

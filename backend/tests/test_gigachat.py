@@ -101,6 +101,69 @@ class GigaChatClientTests(unittest.TestCase):
         finally:
             http_client.close()
 
+    def test_retries_transient_completion_disconnect(self):
+        completions = 0
+
+        def handle(request):
+            nonlocal completions
+            if request.url.path == '/api/v2/oauth':
+                return httpx.Response(200, json={
+                    'access_token': 'token', 'expires_at': time.time() + 1800,
+                })
+            completions += 1
+            if completions == 1:
+                raise httpx.RemoteProtocolError('connection closed')
+            return httpx.Response(200, json={
+                'choices': [{'message': {'content': '{"action":"unknown"}'}}],
+            })
+
+        http_client = httpx.Client(transport=httpx.MockTransport(handle))
+        client = GigaChatClient(
+            auth_key='secret-key', scope='GIGACHAT_API_PERS', model='GigaChat-2',
+            http_client=http_client,
+        )
+        try:
+            with mock.patch('src.adapters.gigachat.time.sleep'):
+                result = client.complete_json('system', 'user', {'type': 'object'})
+            self.assertEqual(result, {'action': 'unknown'})
+            self.assertEqual(completions, 2)
+        finally:
+            http_client.close()
+
+    def test_can_refresh_token_after_transient_disconnect(self):
+        auth_calls = completion_calls = 0
+
+        def handle(request):
+            nonlocal auth_calls, completion_calls
+            if request.url.path == '/api/v2/oauth':
+                auth_calls += 1
+                return httpx.Response(200, json={
+                    'access_token': f'token-{auth_calls}',
+                    'expires_at': time.time() + 1800,
+                })
+            completion_calls += 1
+            if completion_calls == 1:
+                raise httpx.RemoteProtocolError('connection closed')
+            if completion_calls == 2:
+                return httpx.Response(401)
+            self.assertEqual(request.headers['authorization'], 'Bearer token-2')
+            return httpx.Response(200, json={
+                'choices': [{'message': {'content': '{"action":"unknown"}'}}],
+            })
+
+        http_client = httpx.Client(transport=httpx.MockTransport(handle))
+        client = GigaChatClient(
+            auth_key='secret-key', scope='GIGACHAT_API_PERS', model='GigaChat-2',
+            http_client=http_client,
+        )
+        try:
+            with mock.patch('src.adapters.gigachat.time.sleep'):
+                result = client.complete_json('system', 'user', {'type': 'object'})
+            self.assertEqual(result, {'action': 'unknown'})
+            self.assertEqual((auth_calls, completion_calls), (2, 3))
+        finally:
+            http_client.close()
+
 
 if __name__ == '__main__':
     unittest.main()

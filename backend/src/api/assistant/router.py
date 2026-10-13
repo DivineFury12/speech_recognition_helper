@@ -1,4 +1,6 @@
 import uuid
+import hashlib
+import json
 
 import fastapi
 
@@ -25,7 +27,8 @@ def get_assistant_service(request: fastapi.Request) -> src.ports.assistant.Assis
     '/messages',
     operation_id='sendTextMessage',
     response_model=src.schemas.assistant.AssistantTurn,
-    responses={501: {'description': 'Обработка команд пока не подключена'}},
+    responses={409: {'description': 'request_id использован с другим содержимым'},
+               501: {'description': 'Обработка команд пока не подключена'}},
 )
 def send_text_message(
     message: src.schemas.assistant.TextMessageRequest,
@@ -36,6 +39,7 @@ def send_text_message(
         text=message.text,
         timezone=message.timezone,
         conversation_id=message.conversation_id,
+        request_id=message.request_id or uuid.uuid4(),
     )
 
 
@@ -43,13 +47,15 @@ def send_text_message(
     '/audio',
     operation_id='sendAudioMessage',
     response_model=src.schemas.assistant.AssistantTurn,
-    responses={501: {'description': 'Обработка команд пока не подключена'}},
+    responses={409: {'description': 'request_id использован с другим содержимым'},
+               501: {'description': 'Обработка команд пока не подключена'}},
 )
 def send_audio_message(
     request: fastapi.Request,
     file: fastapi.UploadFile = fastapi.File(...),
     timezone: str = fastapi.Form(..., min_length=1),
     conversation_id: uuid.UUID | None = fastapi.Form(None),
+    request_id: uuid.UUID | None = fastapi.Form(None),
     transcription: src.services.transcriber.TranscriptionService = fastapi.Depends(
         get_transcription_service
     ),
@@ -58,6 +64,12 @@ def send_audio_message(
     if not timezone:
         raise fastapi.HTTPException(status_code=422, detail='Укажите часовой пояс')
     assistant = get_assistant_service(request)
+    audio_hash = hashlib.file_digest(file.file, 'sha256').hexdigest()
+    file.file.seek(0)
+    fingerprint = hashlib.sha256(json.dumps({
+        'source': 'audio', 'audio_hash': audio_hash, 'timezone': timezone,
+        'conversation_id': str(conversation_id) if conversation_id else None,
+    }, sort_keys=True).encode('utf-8')).hexdigest()
     text = transcription.transribe(file.file, file.filename).strip()
     if not text:
         raise fastapi.HTTPException(status_code=400, detail='Речь не распознана')
@@ -65,4 +77,6 @@ def send_audio_message(
         text=text,
         timezone=timezone,
         conversation_id=conversation_id,
+        request_id=request_id or uuid.uuid4(),
+        request_fingerprint=fingerprint,
     )

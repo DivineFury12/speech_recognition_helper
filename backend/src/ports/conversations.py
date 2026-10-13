@@ -13,6 +13,7 @@ class ConversationState:
     id: uuid.UUID
     pending_command: AssistantCommand | None
     messages: list[ConversationMessage]
+    last_entry_id: uuid.UUID | None = None
 
 
 class ConversationRepository(typing.Protocol):

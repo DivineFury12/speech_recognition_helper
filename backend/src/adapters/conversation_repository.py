@@ -5,9 +5,10 @@ import uuid
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
+from src.db_transaction import database_session
 from src.models.conversation import ConversationMessageRow, ConversationRow
 from src.ports.conversations import ConversationState
-from src.schemas.assistant import AssistantTurn, ConversationMessage
+from src.schemas.assistant import AssistantIntent, AssistantStatus, AssistantTurn, ConversationMessage
 from src.schemas.assistant_command import AssistantCommand
 
 
@@ -20,7 +21,7 @@ class SqlAlchemyConversationRepository:
         self._sessions = sessions
 
     def get(self, conversation_id: uuid.UUID) -> ConversationState | None:
-        with self._sessions() as session:
+        with database_session(self._sessions) as session:
             row = session.get(ConversationRow, conversation_id)
             if row is None:
                 return None
@@ -35,12 +36,13 @@ class SqlAlchemyConversationRepository:
                 pending_command=AssistantCommand.model_validate(row.pending_command)
                 if row.pending_command else None,
                 messages=[_message(item) for item in reversed(recent)],
+                last_entry_id=row.last_entry_id,
             )
 
     def save_turn(
         self, turn: AssistantTurn, pending_command: AssistantCommand | None,
     ) -> None:
-        with self._sessions.begin() as session:
+        with database_session(self._sessions, write=True) as session:
             row = session.get(ConversationRow, turn.conversation_id, with_for_update=True)
             if row is None:
                 row = ConversationRow(id=turn.conversation_id)
@@ -49,6 +51,13 @@ class SqlAlchemyConversationRepository:
             row.pending_command = (
                 pending_command.model_dump(mode='json') if pending_command else None
             )
+            if turn.status == AssistantStatus.completed:
+                if turn.intent == AssistantIntent.delete_entry:
+                    row.last_entry_id = None
+                elif len(turn.entries) == 1:
+                    row.last_entry_id = turn.entries[0].id
+                elif turn.intent in (AssistantIntent.list_entries, AssistantIntent.search_entries):
+                    row.last_entry_id = None
             session.add_all([
                 ConversationMessageRow(
                     id=uuid.uuid4(), conversation_id=turn.conversation_id,
@@ -61,7 +70,7 @@ class SqlAlchemyConversationRepository:
             ])
 
     def list_messages(self, conversation_id: uuid.UUID) -> list[ConversationMessage] | None:
-        with self._sessions() as session:
+        with database_session(self._sessions) as session:
             if session.get(ConversationRow, conversation_id) is None:
                 return None
             rows = session.scalars(

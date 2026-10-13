@@ -2,7 +2,7 @@ import type { AssistantTurn, EntryList, ErrorResponse, HealthResponse, ListEntri
 
 const BASE_URL = (import.meta.env.VITE_API_URL ?? '').replace(/\/+$/, '')
 
-const ASSISTANT_TIMEOUT_MS = 60_000
+const ASSISTANT_TIMEOUT_MS = 120_000
 const DEFAULT_TIMEOUT_MS = 15_000
 
 export class ApiError extends Error {
@@ -48,11 +48,13 @@ export function sendAudioMessage(params: {
   filename: string
   timezone: string
   conversation_id?: string
+  request_id?: string
 }): Promise<AssistantTurn> {
   const form = new FormData()
   form.append('file', params.file, params.filename)
   form.append('timezone', params.timezone)
   if (params.conversation_id) form.append('conversation_id', params.conversation_id)
+  if (params.request_id) form.append('request_id', params.request_id)
   return request('/v1/assistant/audio', { method: 'POST', body: form }, ASSISTANT_TIMEOUT_MS)
 }
 

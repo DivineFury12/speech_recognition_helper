@@ -3,13 +3,29 @@
 import datetime
 import logging
 import math
+import re
+import uuid
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from src.ports.embeddings import EmbeddingModel, EmbeddingUnavailableError
 from src.ports.entries import EntryRepository
-from src.schemas.assistant import Entry, EntryKind, EntryStatus
+from src.schemas.assistant import Entry, EntryKind, EntryStatus, EntryUpdate
 
 
 logger = logging.getLogger(__name__)
+DEFAULT_MEETING_DURATION_MINUTES = 60
+# Scores were checked against short Russian title/query pairs for each model.
+# Prefer missing a weak semantic match to suggesting an unrelated record.
+SEMANTIC_MIN_SIMILARITY = {
+    'intfloat/multilingual-e5-small': 0.84,
+    'ai-forever/FRIDA': 0.30,
+}
+GENERIC_SEARCH_WORDS = {
+    'задача', 'задачу', 'задачи', 'встреча', 'встречу', 'встречи',
+    'напоминание', 'напоминания', 'запись', 'записи', 'записку',
+    'удали', 'удалить', 'перенеси', 'перенести', 'покажи', 'найди',
+    'про', 'для', 'мне', 'мою', 'мой', 'это', 'эту', 'этот',
+}
 
 
 class EntryService:
@@ -31,27 +47,152 @@ class EntryService:
             logger.warning('Embedding unavailable; using text search fallback', exc_info=True)
             return None
 
+    @staticmethod
+    def _duration_for_create(kind: EntryKind, duration_minutes: int | None) -> int | None:
+        if kind != EntryKind.meeting:
+            if duration_minutes is not None:
+                raise ValueError('Длительность можно задать только для встречи')
+            return None
+        if duration_minutes is None:
+            return DEFAULT_MEETING_DURATION_MINUTES
+        if not 1 <= duration_minutes <= 1440:
+            raise ValueError('Длительность встречи должна быть от 1 до 1440 минут')
+        return duration_minutes
+
+    def get(self, entry_id: uuid.UUID) -> Entry | None:
+        return self._repository.get(entry_id)
+
+    def update(self, entry_id: uuid.UUID, patch: EntryUpdate) -> Entry | None:
+        existing = self.get(entry_id)
+        if existing is None:
+            return None
+        changes = patch.model_dump(exclude_unset=True)
+        if 'timezone' in changes:
+            try:
+                ZoneInfo(changes['timezone'])
+            except (ZoneInfoNotFoundError, ValueError) as exc:
+                raise ValueError('Укажите корректный часовой пояс IANA') from exc
+        date = changes.get('date', existing.date)
+        time = changes.get('time', existing.time)
+        if time is not None and date is None:
+            raise ValueError('Время требует даты')
+        if existing.kind in (EntryKind.meeting, EntryKind.reminder) and (date is None or time is None):
+            raise ValueError('Для встречи или напоминания нужны дата и время')
+        if 'duration_minutes' in changes and existing.kind != EntryKind.meeting:
+            raise ValueError('Длительность можно задать только для встречи')
+        if existing.kind == EntryKind.meeting:
+            if 'duration_minutes' in changes and changes['duration_minutes'] is None:
+                raise ValueError('Длительность встречи не может быть пустой')
+            if existing.duration_minutes is None and 'duration_minutes' not in changes:
+                changes['duration_minutes'] = DEFAULT_MEETING_DURATION_MINUTES
+        if 'title' in changes:
+            changes['title'] = changes['title'].strip()
+        embedding = self._embedding(changes['title']) if 'title' in changes else None
+        return self._repository.update(
+            entry_id, changes, embedding=embedding,
+            embedding_model=self._embedder.name if embedding is not None else None,
+        )
+
+    def delete(self, entry_id: uuid.UUID) -> bool:
+        return self._repository.delete(entry_id)
+
+    def find_candidates(
+        self, query: str | None, *, kind: EntryKind | None = None,
+        date: datetime.date | None = None, time: str | None = None, limit: int = 10,
+    ) -> tuple[list[Entry], bool]:
+        """Exact text matches are safe to select; semantic matches need clarification."""
+        if query:
+            matches, exact = self._text_candidates(query, kind=kind, limit=limit)
+            if not matches:
+                matches = self._semantic_candidates(query, kind=kind, limit=limit)
+        elif date is not None:
+            matches = self._repository.list_period(date, date, kind=kind)
+            exact = True
+        else:
+            return [], False
+        matches = [entry for entry in matches if
+                   (date is None or entry.date == date) and
+                   (time is None or entry.time == time)]
+        return matches[:limit], exact
+
+    @staticmethod
+    def _search_stems(text: str) -> set[str]:
+        words = re.findall(r'[а-яёa-z]{4,}', text.casefold())
+        return {
+            word.replace('ё', 'е')[:4] for word in words
+            if word not in GENERIC_SEARCH_WORDS
+        }
+
+    def _text_candidates(
+        self, query: str, *, kind: EntryKind | None, limit: int,
+    ) -> tuple[list[Entry], bool]:
+        normalized = ' '.join(query.split())
+        variants = [normalized]
+        shorter = re.sub(
+            r'^(?:задач\w*|встреч\w*|напоминани\w*|запис\w*)\s+',
+            '', normalized, flags=re.IGNORECASE,
+        )
+        shorter = re.sub(r'^(?:про|о)\s+', '', shorter, flags=re.IGNORECASE)
+        if shorter and shorter != normalized:
+            variants.append(shorter)
+        stems = self._search_stems(shorter)
+        if not stems:
+            return [], False
+        for variant in variants:
+            exact = self._repository.search_text(variant, kind=kind, limit=limit)
+            if exact:
+                return exact, True
+
+        candidates: dict[uuid.UUID, Entry] = {}
+        for stem in stems:
+            for entry in self._repository.search_text(stem, kind=kind, limit=max(25, limit * 5)):
+                title_stems = self._search_stems(entry.title)
+                if stem in title_stems:
+                    candidates[entry.id] = entry
+        ranked = sorted(
+            candidates.values(),
+            key=lambda entry: (-len(stems & self._search_stems(entry.title)),
+                               -entry.created_at.timestamp()),
+        )
+        return ranked[:limit], False
+
+    def _semantic_candidates(
+        self, query: str, *, kind: EntryKind | None, limit: int,
+    ) -> list[Entry]:
+        if not self._search_stems(query):
+            return []
+        vector = self._embedding(query, query=True)
+        if vector is None:
+            return []
+        minimum = SEMANTIC_MIN_SIMILARITY.get(self._embedder.name, 0.86)
+        return self._repository.search_similar(
+            vector, embedding_model=self._embedder.name, kind=kind,
+            limit=limit, min_similarity=minimum,
+        )
+
     def create(
         self, *, kind: EntryKind, title: str, date: datetime.date | None,
-        time: str | None, timezone: str,
+        time: str | None, timezone: str, duration_minutes: int | None = None,
     ) -> Entry:
+        duration_minutes = self._duration_for_create(kind, duration_minutes)
         embedding = self._embedding(title)
         return self._repository.create(
             kind=kind, title=title, date=date, time=time, timezone=timezone,
-            embedding=embedding,
+            embedding=embedding, duration_minutes=duration_minutes,
             embedding_model=self._embedder.name if embedding is not None else None,
         )
 
     def create_once(
         self, *, kind: EntryKind, title: str, date: datetime.date | None,
-        time: str | None, timezone: str,
+        time: str | None, timezone: str, duration_minutes: int | None = None,
     ) -> tuple[Entry, bool]:
         """Return the matching pending entry when the same command is repeated."""
         title = ' '.join(title.split())
+        duration_minutes = self._duration_for_create(kind, duration_minutes)
         embedding = self._embedding(title)
         return self._repository.create_once(
             kind=kind, title=title, date=date, time=time, timezone=timezone,
-            embedding=embedding,
+            embedding=embedding, duration_minutes=duration_minutes,
             embedding_model=self._embedder.name if embedding is not None else None,
         )
 
@@ -63,24 +204,10 @@ class EntryService:
 
     def search(self, query: str, *, kind: EntryKind | None = None, limit: int = 5) -> list[Entry]:
         query = query.strip()
-        if not query:
+        if not query or limit <= 0:
             return []
-        matches = self._repository.search_text(query, kind=kind, limit=limit)
-        if len(matches) >= limit:
-            return matches
-        vector = self._embedding(query, query=True)
-        if vector is None:
-            return matches
-        seen = {entry.id for entry in matches}
-        for entry in self._repository.search_similar(
-            vector, embedding_model=self._embedder.name, kind=kind, limit=limit,
-        ):
-            if entry.id not in seen:
-                matches.append(entry)
-                seen.add(entry.id)
-                if len(matches) >= limit:
-                    break
-        return matches
+        matches, _ = self._text_candidates(query, kind=kind, limit=limit)
+        return matches if matches else self._semantic_candidates(query, kind=kind, limit=limit)
 
     def reindex_missing(self, *, limit: int | None = None) -> int:
         """Compute the selected model's vectors for entries not yet indexed by it."""

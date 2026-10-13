@@ -74,10 +74,13 @@ export interface paths {
          * Отправить текстовый запрос ассистенту
          * @description Основной маршрут текстовой кнопки. Ассистент определяет намерение,
          *     через GigaChat извлекает структурированную команду и возвращает ответ.
-         *     При подключённой БД создание, список и поиск возвращают status = completed.
+         *     При подключённой БД создание, список, поиск, изменение и удаление
+         *     возвращают status = completed.
          *     При нехватке данных ответ имеет status = needs_clarification. Следующий
          *     ответ пользователя отправляется с тем же conversation_id; история и
-         *     незавершённая команда сохраняются на сервере.
+         *     незавершённая команда сохраняются на сервере. При неоднозначном выборе
+         *     записи ответ содержит варианты в entries; следующий ответ может быть
+         *     «вторую» или «ту, что в 16:00».
          */
         post: operations["sendTextMessage"];
         delete?: never;
@@ -218,14 +221,19 @@ export interface components {
          *     перед сохранением или поиском; фронтенд этот объект не отправляет.
          *     Для create_entry нужны kind и title; date и time обязательны для встречи
          *     и напоминания. Для list_entries нужны date_from/date_to, для
-         *     search_entries — query. date_phrase и time_phrase должны содержать
-         *     точные фразы пользователя, подтверждающие дату и время. Отсутствующие
+         *     search_entries — query. Для complete_entry, update_entry и delete_entry
+         *     используются target_query и необязательные target_date/target_time.
+         *     При update_entry новые значения передаются в new_title/date/time/duration_minutes.
+         *     date_phrase и time_phrase должны содержать
+         *     точные фразы пользователя, подтверждающие дату и время. duration_phrase
+         *     содержит слова о длительности встречи; без них сервер применяет 60 минут
+         *     при создании и сохраняет прежнюю длительность при переносе. Отсутствующие
          *     данные модель возвращает как null; обязательность для выполнения
          *     конкретного действия проверяет сервер.
          */
         AssistantCommand: {
             /** @enum {string} */
-            action: "create_entry" | "list_entries" | "search_entries" | "unknown";
+            action: "create_entry" | "list_entries" | "search_entries" | "complete_entry" | "update_entry" | "delete_entry" | "unknown";
             /** @enum {string|null} */
             kind: "task" | "reminder" | "meeting" | null;
             title: string | null;
@@ -234,11 +242,20 @@ export interface components {
             date_phrase: string | null;
             time: string | null;
             time_phrase: string | null;
+            duration_minutes: number | null;
+            duration_phrase: string | null;
             /** Format: date */
             date_from: string | null;
             /** Format: date */
             date_to: string | null;
             query: string | null;
+            target_query: string | null;
+            /** Format: date */
+            target_date: string | null;
+            target_date_phrase: string | null;
+            target_time: string | null;
+            target_time_phrase: string | null;
+            new_title: string | null;
         };
         ErrorResponse: {
             detail: string;
@@ -284,6 +301,11 @@ export interface components {
              * @description Передать для продолжения диалога; при новом диалоге опустить.
              */
             conversation_id?: string;
+            /**
+             * Format: uuid
+             * @description Один и тот же ID при повторе того же текстового запроса.
+             */
+            request_id?: string;
         };
         /**
          * @example {
@@ -301,6 +323,8 @@ export interface components {
             conversation_id: string;
             /** Format: uuid */
             turn_id: string;
+            /** Format: uuid */
+            request_id?: string | null;
             /** @description Исходный текст или результат распознавания речи. */
             user_text: string;
             /** @description Ответ пользователю, включая уточняющий вопрос. */
@@ -308,8 +332,8 @@ export interface components {
             /** @enum {string} */
             status: "completed" | "needs_clarification" | "no_action";
             /** @enum {string} */
-            intent: "create_entry" | "list_entries" | "search_entries" | "unknown";
-            /** @description Созданные или найденные записи; пустой список при уточнении. */
+            intent: "create_entry" | "list_entries" | "search_entries" | "complete_entry" | "update_entry" | "delete_entry" | "unknown";
+            /** @description Созданные, найденные или изменённые записи; при выборе цели содержит варианты. */
             entries: components["schemas"]["Entry"][];
         };
         ConversationMessage: {
@@ -341,7 +365,7 @@ export interface components {
             time: string | null;
             /** @example Europe/Moscow */
             timezone: string;
-            /** @description Длительность встречи; для остальных типов null. */
+            /** @description Длительность встречи; по умолчанию 60 минут. Для остальных типов null. */
             duration_minutes?: number | null;
             status?: components["schemas"]["EntryStatus"];
             /**
@@ -543,6 +567,13 @@ export interface operations {
                     "application/json": components["schemas"]["AssistantTurn"];
                 };
             };
+            /** @description request_id использован с другим содержимым */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
             422: components["responses"]["ValidationError"];
             501: components["responses"]["NotImplemented"];
             502: components["responses"]["ExternalModelError"];
@@ -573,6 +604,11 @@ export interface operations {
                      * @description Передать для продолжения диалога.
                      */
                     conversation_id?: string;
+                    /**
+                     * Format: uuid
+                     * @description Один и тот же ID при повторе того же голосового запроса.
+                     */
+                    request_id?: string;
                 };
             };
         };
@@ -587,6 +623,13 @@ export interface operations {
                 };
             };
             400: components["responses"]["BadRequest"];
+            /** @description request_id использован с другим содержимым */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
             422: components["responses"]["ValidationError"];
             501: components["responses"]["NotImplemented"];
             502: components["responses"]["ExternalModelError"];

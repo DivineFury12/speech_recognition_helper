@@ -91,7 +91,8 @@ class GigaChatClient:
             },
         }
         token = self._access_token()
-        for attempt in range(2):
+        refreshed_token = False
+        for attempt in range(3):
             try:
                 response = self._http.post(
                     self._chat_url,
@@ -101,8 +102,12 @@ class GigaChatClient:
                     },
                     json=request_body,
                 )
-                if response.status_code == 401 and attempt == 0:
+                if response.status_code == 401 and not refreshed_token:
                     token = self._access_token(refresh=True)
+                    refreshed_token = True
+                    continue
+                if response.status_code in (502, 503, 504) and attempt < 2:
+                    time.sleep(0.4 * (attempt + 1))
                     continue
                 response.raise_for_status()
                 content = response.json()['choices'][0]['message']['content']
@@ -110,6 +115,11 @@ class GigaChatClient:
                 if not isinstance(result, dict):
                     raise ValueError('model response is not an object')
                 return result
+            except httpx.TransportError as exc:
+                if attempt < 2:
+                    time.sleep(0.4 * (attempt + 1))
+                    continue
+                raise GigaChatAPIError('Не удалось связаться с GigaChat') from exc
             except (httpx.HTTPError, ValueError, KeyError, IndexError, TypeError) as exc:
                 raise GigaChatAPIError('Не удалось получить корректный ответ GigaChat') from exc
         raise GigaChatAPIError('Не удалось авторизовать запрос к GigaChat')

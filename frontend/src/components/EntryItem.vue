@@ -11,7 +11,12 @@ const when = computed(() => {
   const e = props.entry
   const parts: string[] = []
   if (e.date) parts.push(formatDate(e.date))
-  if (e.time) parts.push(e.time)
+  if (e.time && e.kind === 'meeting' && e.duration_minutes) {
+    const [hours, minutes] = e.time.split(':').map(Number)
+    const end = hours * 60 + minutes + e.duration_minutes
+    const endTime = `${String(Math.floor(end / 60) % 24).padStart(2, '0')}:${String(end % 60).padStart(2, '0')}`
+    parts.push(`${e.time}–${endTime}${end >= 1440 ? ' (+1 день)' : ''}`)
+  } else if (e.time) parts.push(e.time)
   if (e.duration_minutes) parts.push(`${e.duration_minutes} мин`)
   return parts.join(' · ') || 'без срока'
 })

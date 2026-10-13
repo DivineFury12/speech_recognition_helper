@@ -12,5 +12,7 @@ class AssistantService(typing.Protocol):
         text: str,
         timezone: str,
         conversation_id: uuid.UUID | None,
+        request_id: uuid.UUID | None = None,
+        request_fingerprint: str | None = None,
     ) -> src.schemas.assistant.AssistantTurn:
         ...

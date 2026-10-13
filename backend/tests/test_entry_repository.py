@@ -45,6 +45,12 @@ class EntryRepositoryIntegrationTests(unittest.TestCase):
                         [0.1] * dimensions, embedding_model=model_name, limit=100,
                     )
                     self.assertIn(entry.id, [item.id for item in found])
+                    unrelated = self.repository.search_similar(
+                        [1.0, -1.0] + [0.0] * (dimensions - 2),
+                        embedding_model=model_name, limit=100,
+                        min_similarity=0.3,
+                    )
+                    self.assertNotIn(entry.id, [item.id for item in unrelated])
         finally:
             with self.sessions.begin() as session:
                 session.execute(delete(EntryRow).where(EntryRow.id == entry.id))
@@ -64,6 +70,23 @@ class EntryRepositoryIntegrationTests(unittest.TestCase):
         finally:
             with self.sessions.begin() as session:
                 session.execute(delete(EntryRow).where(EntryRow.id == first.id))
+
+    def test_meeting_duration_is_persisted_and_kept_on_move(self):
+        entry = self.repository.create(
+            kind=EntryKind.meeting, title=f'Duration check {uuid.uuid4()}',
+            date=datetime.date(2026, 10, 20), time='10:00',
+            timezone='Europe/Moscow', duration_minutes=45,
+            embedding=None, embedding_model=None,
+        )
+        try:
+            self.assertEqual(self.repository.get(entry.id).duration_minutes, 45)
+            moved = self.repository.update(
+                entry.id, {'time': '11:00'}, embedding=None, embedding_model=None,
+            )
+            self.assertEqual(moved.duration_minutes, 45)
+        finally:
+            with self.sessions.begin() as session:
+                session.execute(delete(EntryRow).where(EntryRow.id == entry.id))
 
 
 if __name__ == '__main__':

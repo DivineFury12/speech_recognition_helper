@@ -1,6 +1,5 @@
 import fastapi
 
-import src.adapters.transcriber
 import src.schemas.transcribe
 import src.services.transcriber
 

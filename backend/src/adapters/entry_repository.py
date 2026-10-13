@@ -7,6 +7,7 @@ import uuid
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, sessionmaker
 
+from src.db_transaction import database_session
 from src.models.entry import EntryEmbeddingRow, EntryRow
 from src.schemas.assistant import Entry, EntryKind, EntryStatus
 
@@ -19,6 +20,73 @@ class SqlAlchemyEntryRepository:
     def __init__(self, sessions: sessionmaker[Session]):
         self._sessions = sessions
 
+    def get(self, entry_id: uuid.UUID) -> Entry | None:
+        with database_session(self._sessions) as session:
+            row = session.get(EntryRow, entry_id)
+            return _to_entry(row) if row is not None else None
+
+    def update(
+        self, entry_id: uuid.UUID, changes: dict, *, embedding: list[float] | None,
+        embedding_model: str | None,
+    ) -> Entry | None:
+        with database_session(self._sessions, write=True) as session:
+            row = session.get(EntryRow, entry_id, with_for_update=True)
+            if row is None:
+                return None
+            proposed_title = changes.get('title', row.title)
+            proposed_date = changes.get('date', row.date)
+            proposed_time = changes.get('time', row.time)
+            proposed_timezone = changes.get('timezone', row.timezone)
+            proposed_status = changes.get('status', row.status)
+            if isinstance(proposed_status, EntryStatus):
+                proposed_status = proposed_status.value
+            if proposed_status == EntryStatus.pending.value:
+                normalized_title = ' '.join(proposed_title.casefold().split())
+                signature = '\x1f'.join((
+                    row.kind, normalized_title,
+                    proposed_date.isoformat() if proposed_date else '',
+                    proposed_time or '', proposed_timezone,
+                ))
+                lock_key = int.from_bytes(
+                    hashlib.sha256(signature.encode('utf-8')).digest()[:8],
+                    'big', signed=True,
+                )
+                session.execute(select(func.pg_advisory_xact_lock(lock_key)))
+                duplicate = session.scalar(select(EntryRow.id).where(
+                    EntryRow.id != entry_id,
+                    EntryRow.kind == row.kind,
+                    func.lower(EntryRow.title) == normalized_title,
+                    EntryRow.date == proposed_date,
+                    EntryRow.time == proposed_time,
+                    EntryRow.timezone == proposed_timezone,
+                    EntryRow.status == EntryStatus.pending.value,
+                ).limit(1))
+                if duplicate is not None:
+                    raise ValueError('Такая запись уже есть')
+            title_changed = 'title' in changes and changes['title'] != row.title
+            for name, value in changes.items():
+                setattr(row, name, value.value if isinstance(value, EntryStatus) else value)
+            if title_changed:
+                session.query(EntryEmbeddingRow).filter(
+                    EntryEmbeddingRow.entry_id == entry_id,
+                ).delete(synchronize_session=False)
+                if embedding is not None and embedding_model is not None:
+                    session.add(EntryEmbeddingRow(
+                        entry_id=entry_id, model_name=embedding_model, embedding=embedding,
+                    ))
+            row.updated_at = datetime.datetime.now(datetime.timezone.utc)
+            session.flush()
+            session.refresh(row)
+            return _to_entry(row)
+
+    def delete(self, entry_id: uuid.UUID) -> bool:
+        with database_session(self._sessions, write=True) as session:
+            row = session.get(EntryRow, entry_id, with_for_update=True)
+            if row is None:
+                return False
+            session.delete(row)
+            return True
+
     def create(
         self,
         *,
@@ -29,11 +97,13 @@ class SqlAlchemyEntryRepository:
         timezone: str,
         embedding: list[float] | None,
         embedding_model: str | None,
+        duration_minutes: int | None = None,
     ) -> Entry:
-        with self._sessions.begin() as session:
+        with database_session(self._sessions, write=True) as session:
             return self._insert(
                 session, kind=kind, title=title, date=date, time=time,
                 timezone=timezone, embedding=embedding, embedding_model=embedding_model,
+                duration_minutes=duration_minutes,
             )
 
     @staticmethod
@@ -41,10 +111,12 @@ class SqlAlchemyEntryRepository:
         session: Session, *, kind: EntryKind, title: str,
         date: datetime.date | None, time: str | None, timezone: str,
         embedding: list[float] | None, embedding_model: str | None,
+        duration_minutes: int | None = None,
     ) -> Entry:
         row = EntryRow(
             id=uuid.uuid4(), kind=kind.value, title=title, date=date,
-            time=time, timezone=timezone, status=EntryStatus.pending.value,
+            time=time, timezone=timezone, duration_minutes=duration_minutes,
+            status=EntryStatus.pending.value,
         )
         session.add(row)
         session.flush()
@@ -60,7 +132,7 @@ class SqlAlchemyEntryRepository:
     def create_once(
         self, *, kind: EntryKind, title: str, date: datetime.date | None,
         time: str | None, timezone: str, embedding: list[float] | None,
-        embedding_model: str | None,
+        embedding_model: str | None, duration_minutes: int | None = None,
     ) -> tuple[Entry, bool]:
         normalized_title = ' '.join(title.casefold().split())
         signature = '\x1f'.join((
@@ -70,7 +142,7 @@ class SqlAlchemyEntryRepository:
         lock_key = int.from_bytes(
             hashlib.sha256(signature.encode('utf-8')).digest()[:8], 'big', signed=True,
         )
-        with self._sessions.begin() as session:
+        with database_session(self._sessions, write=True) as session:
             session.execute(select(func.pg_advisory_xact_lock(lock_key)))
             existing = session.scalar(
                 select(EntryRow).where(
@@ -87,6 +159,7 @@ class SqlAlchemyEntryRepository:
             return self._insert(
                 session, kind=kind, title=title, date=date, time=time,
                 timezone=timezone, embedding=embedding, embedding_model=embedding_model,
+                duration_minutes=duration_minutes,
             ), True
 
     def list_period(
@@ -106,7 +179,7 @@ class SqlAlchemyEntryRepository:
         if status is not None:
             statement = statement.where(EntryRow.status == status.value)
         statement = statement.order_by(EntryRow.date, EntryRow.time, EntryRow.created_at)
-        with self._sessions() as session:
+        with database_session(self._sessions) as session:
             return [_to_entry(row) for row in session.scalars(statement)]
 
     def search_text(self, query: str, *, kind: EntryKind | None = None, limit: int = 5) -> list[Entry]:
@@ -116,21 +189,23 @@ class SqlAlchemyEntryRepository:
         if kind is not None:
             statement = statement.where(EntryRow.kind == kind.value)
         statement = statement.order_by(EntryRow.created_at.desc()).limit(limit)
-        with self._sessions() as session:
+        with database_session(self._sessions) as session:
             return [_to_entry(row) for row in session.scalars(statement)]
 
     def search_similar(
         self, embedding: list[float], *, embedding_model: str,
-        kind: EntryKind | None = None, limit: int = 5
+        kind: EntryKind | None = None, limit: int = 5,
+        min_similarity: float = 0.0,
     ) -> list[Entry]:
         distance = EntryEmbeddingRow.embedding.cosine_distance(embedding)
         statement = select(EntryRow).join(EntryEmbeddingRow).where(
             EntryEmbeddingRow.model_name == embedding_model,
+            distance <= 1 - min_similarity,
         )
         if kind is not None:
             statement = statement.where(EntryRow.kind == kind.value)
         statement = statement.order_by(distance).limit(limit)
-        with self._sessions() as session:
+        with database_session(self._sessions) as session:
             return [_to_entry(row) for row in session.scalars(statement)]
 
     def list_unindexed(self, embedding_model: str, *, limit: int = 100) -> list[tuple[uuid.UUID, str]]:
@@ -141,11 +216,11 @@ class SqlAlchemyEntryRepository:
         statement = select(EntryRow.id, EntryRow.title).where(~indexed).order_by(
             EntryRow.created_at, EntryRow.id,
         ).limit(limit)
-        with self._sessions() as session:
+        with database_session(self._sessions) as session:
             return list(session.execute(statement).all())
 
     def save_embedding(self, entry_id: uuid.UUID, embedding_model: str, embedding: list[float]) -> None:
-        with self._sessions.begin() as session:
+        with database_session(self._sessions, write=True) as session:
             row = session.get(EntryEmbeddingRow, (entry_id, embedding_model))
             if row is None:
                 session.add(EntryEmbeddingRow(

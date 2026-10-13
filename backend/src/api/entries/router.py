@@ -1,10 +1,11 @@
 """Direct list and semantic search routes used by the frontend."""
 
 import datetime
+import uuid
 
 import fastapi
 
-from src.schemas.assistant import EntryKind, EntryList, EntryStatus
+from src.schemas.assistant import Entry, EntryKind, EntryList, EntryStatus, EntryUpdate
 from src.services.entries import EntryService
 
 
@@ -43,3 +44,30 @@ def search_entries(
     if not q.strip():
         raise fastapi.HTTPException(status_code=422, detail='Пустой поисковый запрос')
     return EntryList(items=get_entries_service(request).search(q, kind=kind))
+
+
+@router.get('/{entry_id}', operation_id='getEntry', response_model=Entry)
+def get_entry(entry_id: uuid.UUID, request: fastapi.Request) -> Entry:
+    entry = get_entries_service(request).get(entry_id)
+    if entry is None:
+        raise fastapi.HTTPException(status_code=404, detail='Запись не найдена')
+    return entry
+
+
+@router.patch('/{entry_id}', operation_id='updateEntry', response_model=Entry)
+def update_entry(
+    entry_id: uuid.UUID, patch: EntryUpdate, request: fastapi.Request,
+) -> Entry:
+    try:
+        entry = get_entries_service(request).update(entry_id, patch)
+    except ValueError as exc:
+        raise fastapi.HTTPException(status_code=422, detail=str(exc)) from exc
+    if entry is None:
+        raise fastapi.HTTPException(status_code=404, detail='Запись не найдена')
+    return entry
+
+
+@router.delete('/{entry_id}', operation_id='deleteEntry', status_code=204)
+def delete_entry(entry_id: uuid.UUID, request: fastapi.Request) -> None:
+    if not get_entries_service(request).delete(entry_id):
+        raise fastapi.HTTPException(status_code=404, detail='Запись не найдена')

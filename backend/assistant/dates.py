@@ -24,9 +24,11 @@ RECURRENCES = ("daily", "weekdays", "weekly", "monthly")
 NUMBER_WORDS = {
     "один": 1, "одну": 1, "одна": 1, "два": 2, "две": 2, "три": 3, "четыре": 4,
     "пять": 5, "шесть": 6, "семь": 7, "восемь": 8, "девять": 9, "десять": 10,
-    "одиннадцать": 11, "двенадцать": 12,
+    "одиннадцать": 11, "двенадцать": 12, "тринадцать": 13, "четырнадцать": 14, "пятнадцать": 15,
+    "шестнадцать": 16, "семнадцать": 17, "восемнадцать": 18, "девятнадцать": 19, "двадцать": 20,
+    "двадцать один": 21, "двадцать два": 22, "двадцать три": 23,
 }
-NUM = r"(\d{1,2}|" + "|".join(NUMBER_WORDS) + ")"
+NUM = r"(\d{1,2}|" + "|".join(sorted(NUMBER_WORDS, key=len, reverse=True)) + ")"
 
 
 def _num(token: str) -> int:
@@ -332,3 +334,37 @@ def occurrences(start: date, rule: str | None, frm: date, to: date) -> list[date
             if d >= frm:
                 result.append(d)
     return result
+
+
+ANSWER_TIME_RE = re.compile(
+    r"^(?:(?:в|на|к|около|часов в|давай|тогда|лучше|можно)\s+)*" + NUM
+    + r"(?:\s*(?:[:.\-]|\s)\s*([0-5]\d))?\s*(?:час(?:а|ов)?|ч)?\s*(утра|дня|вечера|ночи)?\s*[.!]?$"
+)
+
+
+def parse_time_answer(text: str) -> time | None:
+    m = ANSWER_TIME_RE.match(normalize(text))
+    if not m:
+        return None
+    hour = _num(m.group(1))
+    if hour > 23:
+        return None
+    minute = int(m.group(2)) if m.group(2) else 0
+    part = m.group(3)
+    if part in ("дня", "вечера") and hour < 12:
+        hour += 12
+    elif part == "ночи" and hour == 12:
+        hour = 0
+    elif part is None and 1 <= hour <= 6:
+        hour += 12
+    return time(hour, minute)
+
+
+def mentions_hour(text: str, hour: int) -> bool:
+    t = normalize(text)
+    candidates = {hour, hour - 12} if hour > 12 else {hour, hour + 12}
+    numbers = {int(x) for x in re.findall(r"\d{1,2}", t)}
+    numbers |= {v for k, v in NUMBER_WORDS.items() if re.search(rf"\b{k}\b", t)}
+    if re.search(r"\bпол\w*\s*день|полдень", t):
+        numbers.add(12)
+    return bool(candidates & numbers)

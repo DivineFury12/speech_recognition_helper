@@ -1,5 +1,5 @@
 import { computed, ref, watch } from 'vue'
-import { listVoices, synthesize } from '@/api/client'
+import { ApiError, listVoices, synthesize } from '@/api/client'
 import type { VoiceInfo } from '@/api/types'
 
 const STORAGE_KEY = 'assistant-voice'
@@ -25,6 +25,7 @@ const serverAvailable = ref(false)
 const serverLoading = ref(false)
 const speaking = ref(false)
 const previewing = ref<string | null>(null)
+const notice = ref<string | null>(null)
 let audio: HTMLAudioElement | null = null
 let audioUrl: string | null = null
 let pollTimer: number | undefined
@@ -88,29 +89,81 @@ function speakBrowser(text: string) {
   window.speechSynthesis.speak(utterance)
 }
 
+function splitText(text: string, limit = 220): string[] {
+  const sentences = text
+    .split(/\n+|(?<=[.!?…])\s+/)
+    .map((x) => x.trim())
+    .filter(Boolean)
+  const parts: string[] = []
+  for (const sentence of sentences) {
+    const last = parts[parts.length - 1]
+    if (last && last.length + 1 + sentence.length <= limit) parts[parts.length - 1] = `${last} ${sentence}`
+    else parts.push(sentence)
+  }
+  return parts
+}
+
+function playBlob(blob: Blob, id: number): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (id !== requestId) return resolve()
+    audioUrl = URL.createObjectURL(blob)
+    audio = new Audio(audioUrl)
+    const done = () => {
+      if (audioUrl) URL.revokeObjectURL(audioUrl)
+      audioUrl = null
+      resolve()
+    }
+    audio.onended = done
+    audio.onerror = () => reject(new Error('Не удалось воспроизвести звук'))
+    audio.play().catch(reject)
+  })
+}
+
+function voiceName(voiceId: string): string {
+  return serverVoices.value.find((v) => v.id === voiceId)?.name ?? voiceId
+}
+
 async function speakWith(voiceId: string, text: string) {
   stop()
   const id = ++requestId
   if (!text) return
-  if (voiceId === BROWSER_VOICE || !serverAvailable.value) {
+  if (voiceId === BROWSER_VOICE) {
+    speakBrowser(text)
+    return
+  }
+  if (!serverAvailable.value) {
+    notice.value = serverLoading.value
+      ? `Голос «${voiceName(voiceId)}» ещё загружается — этот ответ прочитал голос браузера`
+      : `Голос «${voiceName(voiceId)}» недоступен на сервере — ответ прочитал голос браузера`
+    void loadVoices()
     speakBrowser(text)
     return
   }
   speaking.value = true
+  const parts = splitText(text)
   try {
-    const blob = await synthesize(text, voiceId)
-    if (id !== requestId) return
-    audioUrl = URL.createObjectURL(blob)
-    audio = new Audio(audioUrl)
-    audio.onended = () => {
-      speaking.value = false
-      previewing.value = null
+    let next: Promise<Blob> | null = synthesize(parts[0], voiceId)
+    for (let i = 0; i < parts.length && next; i++) {
+      const blob: Blob = await next
+      if (id !== requestId) return
+      next = i + 1 < parts.length ? synthesize(parts[i + 1], voiceId) : null
+      await playBlob(blob, id)
+      if (id !== requestId) return
     }
-    await audio.play()
-  } catch {
+  } catch (e) {
+    if (id !== requestId) return
+    if (e instanceof ApiError && e.status === 503) {
+      serverAvailable.value = false
+      void loadVoices()
+    }
+    notice.value =
+      e instanceof DOMException && e.name === 'NotAllowedError'
+        ? 'Браузер заблокировал звук — кликните по странице, и озвучка заработает'
+        : `Не удалось озвучить ответ голосом «${voiceName(voiceId)}»`
+  } finally {
     if (id === requestId) {
       speaking.value = false
-      speakBrowser(text)
+      previewing.value = null
     }
   }
 }
@@ -141,6 +194,7 @@ export function useSpeech() {
     speaking,
     previewing,
     browserSupported,
+    notice,
     loadVoices,
     preview,
     stop,

@@ -23,6 +23,18 @@ KIND_PLURAL = {
     None: ("запись", "записи", "записей"),
 }
 CANCEL_RE = re.compile(r"^\s*(?:нет,?\s*)?(?:отмена|отмени(?:те)?|не надо|не нужно|забудь|стоп|хватит)\s*[.!]*\s*$", re.I)
+DRAFT_CANCEL_WORDS = (
+    "нет", "не надо", "не нужно", "не ставь", "не ставим", "не создавай", "не создаем", "не создаем",
+    "не будем", "не хочу", "не напоминай", "уже не надо", "ничего не надо",
+)
+DRAFT_CANCEL_PREFIXES = ("отмен", "передумал", "забудь", "стоп", "хватит")
+
+
+def _is_draft_cancel(text: str) -> bool:
+    t = " ".join(text.lower().replace("е", "е").split()).strip(" .!")
+    if t.startswith(DRAFT_CANCEL_PREFIXES):
+        return True
+    return any(t == w or t.startswith((w + " ", w + ",")) for w in DRAFT_CANCEL_WORDS)
 YES_RE = re.compile(
     r"^\s*(?:да|ага|угу|ок|окей|давай|конечно|верно|подтверждаю|ставь|удаляй|удали|всё равно|все равно|пусть)\b", re.I
 )
@@ -113,7 +125,7 @@ class Assistant:
         ctx = Ctx(user_id, tz_name, now, cid)
 
         draft = self._load_draft(cid)
-        if draft and CANCEL_RE.match(text):
+        if draft and (CANCEL_RE.match(text) or (draft["type"] == "create" and _is_draft_cancel(text))):
             self.storage.delete_draft(cid)
             result = self._turn("Хорошо, отменил.", "no_action", draft.get("intent", "unknown"), [])
         elif draft and draft["type"] == "confirm":
@@ -171,7 +183,7 @@ class Assistant:
             return False
         return bool(CREATE_RE.search(dates.normalize(text)))
 
-    def _resolve(self, parsed: Parsed, now: datetime) -> dict[str, Any]:
+    def _resolve(self, parsed: Parsed, now: datetime, text: str | None = None) -> dict[str, Any]:
         today = now.date()
         rel = dates.find_relative_datetime(" ".join(filter(None, [parsed.date_phrase, parsed.time_phrase])), now)
         d = dates.parse_date(parsed.date_phrase, today)
@@ -183,9 +195,11 @@ class Assistant:
                 d = date.fromisoformat(parsed.date_iso)
             except ValueError:
                 pass
-        if t is None and parsed.time_phrase and parsed.time_hhmm:
+        if t is None and parsed.time_hhmm:
             try:
-                t = time.fromisoformat(parsed.time_hhmm)
+                candidate = time.fromisoformat(parsed.time_hhmm)
+                if parsed.time_phrase or (text and dates.mentions_hour(text, candidate.hour)):
+                    t = candidate
             except ValueError:
                 pass
         return {"date": d.isoformat() if d else None, "time": t.strftime("%H:%M") if t else None}
@@ -199,14 +213,18 @@ class Assistant:
             fields["date"] = now.date().isoformat()
 
     def _create(self, parsed: Parsed, text: str, ctx: Ctx, draft: dict | None) -> dict[str, Any]:
-        resolved = self._resolve(parsed, ctx.now)
+        resolved = self._resolve(parsed, ctx.now, text)
+        if draft and draft.get("missing") in ("time", "datetime") and not resolved["time"]:
+            answer = dates.parse_time_answer(text)
+            if answer:
+                resolved["time"] = answer.strftime("%H:%M")
         fields = dict(draft["fields"]) if draft else {}
         fields.setdefault("kind", parsed.kind or "task")
         if not fields.get("title"):
             if draft and draft.get("missing") == "title":
-                fields["title"] = parsed.title or _as_title(text)
+                fields["title"] = _as_title(parsed.title or text)
             elif parsed.title:
-                fields["title"] = parsed.title
+                fields["title"] = parsed.title[:1].upper() + parsed.title[1:]
         for key in ("date", "time"):
             if resolved[key]:
                 fields[key] = resolved[key]

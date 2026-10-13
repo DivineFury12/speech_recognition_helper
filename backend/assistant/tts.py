@@ -4,6 +4,9 @@ import hashlib
 import io
 import logging
 import os
+import re
+import shutil
+import subprocess
 import threading
 import wave
 from collections import OrderedDict
@@ -17,6 +20,56 @@ log = logging.getLogger(__name__)
 SAMPLE_RATE = 24000
 CACHE_ITEMS = 64
 MAX_CHARS = 600
+CHUNK_CHARS = 170
+PAUSE_SECONDS = 0.18
+STUDIO_FILTER = (
+    "highpass=f=70,lowpass=f=11500,afftdn=nr=6:nf=-50:tn=1,deesser=i=0.3,"
+    "acompressor=threshold=-21dB:ratio=2.5:attack=8:release=80:makeup=1.5,"
+    "loudnorm=I=-16:TP=-1.5:LRA=8"
+)
+
+
+def _cut_long(sentence: str, limit: int) -> list[str]:
+    pieces = []
+    while len(sentence) > limit:
+        cut = sentence.rfind(", ", 0, limit)
+        if cut < limit // 3:
+            cut = sentence.rfind(" ", 0, limit)
+        if cut <= 0:
+            cut = limit
+        pieces.append(sentence[:cut].strip(" ,"))
+        sentence = sentence[cut:].strip(" ,")
+    if sentence:
+        pieces.append(sentence)
+    return pieces
+
+
+def split_for_tts(text: str, limit: int = CHUNK_CHARS) -> list[str]:
+    sentences = []
+    for sentence in re.split(r"(?<=[.!?…;:])\s+", text.strip()):
+        sentences += _cut_long(sentence.strip(), limit)
+    chunks: list[str] = []
+    for sentence in sentences:
+        if chunks and len(chunks[-1]) + 1 + len(sentence) <= limit:
+            chunks[-1] = f"{chunks[-1]} {sentence}"
+        else:
+            chunks.append(sentence)
+    return [c for c in chunks if c]
+
+
+def studio(audio: bytes) -> bytes:
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        return audio
+    try:
+        r = subprocess.run(
+            [ffmpeg, "-hide_banner", "-loglevel", "error", "-f", "wav", "-i", "pipe:0",
+             "-af", STUDIO_FILTER, "-ar", str(SAMPLE_RATE), "-ac", "1", "-f", "wav", "pipe:1"],
+            input=audio, capture_output=True, timeout=30,
+        )
+        return r.stdout if r.returncode == 0 and len(r.stdout) > 44 else audio
+    except (OSError, subprocess.SubprocessError):
+        return audio
 
 
 @dataclass(frozen=True)
@@ -140,9 +193,18 @@ class XttsEngine:
             if key in self._cache:
                 self._cache.move_to_end(key)
                 return self._cache[key]
+            import numpy as np
+
             latent, emb = self._latents[voice_id]
-            out = self._model.inference(spoken, "ru", latent, emb, temperature=0.65, enable_text_splitting=True)
-            audio = _wav_bytes(out["wav"])
+            pause = np.zeros(int(SAMPLE_RATE * PAUSE_SECONDS), dtype="float32")
+            parts = []
+            for chunk in split_for_tts(spoken):
+                out = self._model.inference(
+                    chunk, "ru", latent, emb, temperature=0.55, top_p=0.8,
+                    repetition_penalty=5.0, enable_text_splitting=False,
+                )
+                parts += [np.asarray(out["wav"], dtype="float32"), pause]
+            audio = studio(_wav_bytes(np.concatenate(parts[:-1])))
             self._cache[key] = audio
             if len(self._cache) > CACHE_ITEMS:
                 self._cache.popitem(last=False)

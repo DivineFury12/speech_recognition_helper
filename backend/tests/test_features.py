@@ -214,3 +214,39 @@ def test_recurring_line_shows_occurrence_date(a):
     say("Планёрка каждый понедельник в 10")
     text = say("Что у меня на следующей неделе?")["assistant_text"]
     assert "пн, 12 октября в 10:00 — Планёрка (встреча, каждую неделю)" in text
+
+
+def test_short_time_answers_in_clarification(a):
+    for answer, expected in [("на 16", "16:00"), ("16 00", "16:00"), ("в 4 дня", "16:00"), ("16.30", "16:30")]:
+        say = Chat(a)
+        say("Поставь встречу с Килкой завтра")
+        turn = say(answer)
+        assert turn["status"] == "completed", answer
+        assert turn["entries"][0]["time"] == expected, answer
+        a.storage.delete_entry(turn["entries"][0]["id"])
+
+
+def test_negative_answer_cancels_draft(a):
+    say = Chat(a)
+    say("Поставь встречу с Петром завтра")
+    turn = say("не ставим встречу")
+    assert turn["status"] == "no_action" and "отменил" in turn["assistant_text"]
+    assert a.storage.all_entries() == []
+
+
+def test_llm_time_without_phrase_accepted_when_hour_is_said():
+    reply = '{"intent":"create_entry","kind":"meeting","title":"Встреча с Килкой","date":"2026-10-11","time":"16:00"}'
+    storage = Storage(":memory:")
+    Assistant(storage, None).handle("Поставь встречу с Килкой завтра", TZ, now=NOW)
+    cid = storage._fetchone("SELECT id FROM conversations")["id"]
+
+    class LLM:
+        name = "fake"
+
+        def complete(self, system, user):
+            return reply
+
+    turn = Assistant(storage, LLM()).handle("шестнадцать", TZ, cid, now=NOW)
+    assert turn["entries"][0]["time"] == "16:00"
+    guessed = Assistant(storage, LLM()).handle("Поставь встречу с Олегом завтра", TZ, now=NOW)
+    assert guessed["status"] == "needs_clarification"

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted, ref } from 'vue'
+import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { storeToRefs } from 'pinia'
 import ChatPanel from './components/ChatPanel.vue'
 import EntriesPanel from './components/EntriesPanel.vue'
@@ -9,6 +9,7 @@ import VoicePicker from './components/VoicePicker.vue'
 import { downloadCalendar, getHealth } from './api/client'
 import { useEntriesStore } from './stores/entries'
 import { useSessionStore } from './stores/session'
+import { useSpeech } from './composables/useSpeech'
 import { timezone } from './utils/time'
 
 const mocks = import.meta.env.VITE_USE_MOCKS === 'true'
@@ -30,6 +31,13 @@ function notify(text: string) {
   window.clearTimeout(toastTimer)
   toastTimer = window.setTimeout(() => (toast.value = null), 5000)
 }
+
+const { notice: speechNotice } = useSpeech()
+watch(speechNotice, (text) => {
+  if (!text) return
+  notify(text)
+  speechNotice.value = null
+})
 
 async function checkHealth() {
   try {

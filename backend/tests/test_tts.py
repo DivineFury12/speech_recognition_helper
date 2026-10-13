@@ -57,3 +57,13 @@ def test_synthesis_while_loading(client):
 ])
 def test_for_speech(text, expected):
     assert for_speech(text) == expected
+
+
+def test_split_for_tts_merges_short_and_cuts_long():
+    from assistant.tts import split_for_tts
+
+    assert split_for_tts("Хорошо, отменил.") == ["Хорошо, отменил."]
+    parts = split_for_tts("Например: раз. Два. " + "очень длинное перечисление, " * 12 + "конец.", limit=60)
+    assert all(len(p) <= 60 for p in parts)
+    assert parts[0] == "Например: раз. Два."
+    assert "".join(parts).replace(" ", "").endswith("конец.")

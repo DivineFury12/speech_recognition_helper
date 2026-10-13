@@ -1,6 +1,7 @@
 import datetime
 import unittest
 import uuid
+from zoneinfo import ZoneInfo
 
 import pydantic
 
@@ -9,6 +10,7 @@ from src.schemas.assistant import AssistantIntent, AssistantStatus, Conversation
 from src.schemas.assistant_command import AssistantCommand
 from src.services.assistant import AssistantService, InvalidTimezoneError
 from src.services.command_extractor import ExternalCommandExtractor, InvalidModelResponseError
+from src.services.temporal import parse_date, parse_time
 
 
 class FakeExtractor:
@@ -72,6 +74,8 @@ class FakeModelClient:
 
     def complete_json(self, system_prompt, user_prompt, json_schema):
         self.calls.append((system_prompt, user_prompt, json_schema))
+        if isinstance(self.payload, list):
+            return self.payload.pop(0)
         return self.payload
 
 
@@ -240,6 +244,128 @@ class AssistantServiceTests(unittest.TestCase):
         )
         self.assertEqual(command.date, datetime.date(2026, 10, 12))
         self.assertEqual(command.time, '16:00')
+
+    def test_explicit_time_survives_missing_model_phrase(self):
+        client = FakeModelClient({
+            'action': 'create_entry', 'kind': 'reminder',
+            'title': 'Сварить гречку', 'date': None, 'time': None,
+            'date_phrase': None, 'time_phrase': None,
+        })
+        command = ExternalCommandExtractor(client).extract(
+            'Создай напоминание на завтра на 16:00 сварить гречку',
+            'Europe/Moscow', datetime.date(2026, 10, 11),
+        )
+        self.assertEqual(command.title, 'Сварить гречку')
+        self.assertEqual(command.date, datetime.date(2026, 10, 12))
+        self.assertEqual(command.time, '16:00')
+
+    def test_spoken_time_does_not_turn_date_or_duration_into_clock_time(self):
+        self.assertEqual(parse_time('Создай напоминание на пять утра'), '05:00')
+        self.assertEqual(parse_time('На 4 часа вечера, пожалуйста'), '16:00')
+        self.assertEqual(parse_time('3 ноября на 6 утра'), '06:00')
+        self.assertEqual(parse_time('В четверг в 11 встреча'), '11:00')
+        self.assertIsNone(parse_time('на 3 ноября'))
+        self.assertIsNone(parse_time('через два дня'))
+
+    def test_relative_week_and_date_arithmetic(self):
+        today = datetime.date(2026, 10, 11)
+        for phrase, expected in (
+            ('через неделю', datetime.date(2026, 10, 18)),
+            ('через две недели', datetime.date(2026, 10, 25)),
+            ('через 7 дней', datetime.date(2026, 10, 18)),
+            ('на текущую дату + 7 дней', datetime.date(2026, 10, 18)),
+            ('сегодня плюс семь дней', datetime.date(2026, 10, 18)),
+        ):
+            with self.subTest(phrase=phrase):
+                self.assertEqual(parse_date(phrase, today), expected)
+
+    def test_week_later_reminder_keeps_title_and_evening_time(self):
+        client = FakeModelClient({
+            'action': 'create_entry', 'kind': 'reminder',
+            'title': 'посмотреть фильм', 'date': None, 'date_phrase': None,
+            'time': '18:00', 'time_phrase': 'в 6 вечера',
+        })
+        command = ExternalCommandExtractor(client).extract(
+            'поставь напоменание посмотреть фильм через неделю в 6 вечера',
+            'Europe/Moscow', datetime.date(2026, 10, 11),
+        )
+        self.assertEqual(command.title, 'посмотреть фильм')
+        self.assertEqual(command.date, datetime.date(2026, 10, 18))
+        self.assertEqual(command.time, '18:00')
+
+    def test_date_only_reply_completes_pending_reminder_even_if_model_says_unknown(self):
+        expected_date = datetime.datetime.now(ZoneInfo('Europe/Moscow')).date() + datetime.timedelta(days=7)
+        client = FakeModelClient([
+            {
+                'action': 'create_entry', 'kind': 'reminder',
+                'title': 'посмотреть фильм', 'date': None,
+                'time': '18:00', 'time_phrase': 'в 6 вечера',
+            },
+            {'action': 'unknown', 'title': 'текущую дату'},
+        ])
+        entries = FakeEntries()
+        service = AssistantService(
+            ExternalCommandExtractor(client), entries, FakeConversations(),
+        )
+        first = service.handle_message(
+            'Поставь напоминание посмотреть фильм в 6 вечера',
+            'Europe/Moscow', None,
+        )
+        self.assertEqual(first.status, AssistantStatus.needs_clarification)
+        self.assertIn('дату', first.assistant_text)
+
+        second = service.handle_message(
+            'на текущую дату + 7 дней', 'Europe/Moscow', first.conversation_id,
+        )
+        self.assertEqual(second.status, AssistantStatus.completed)
+        self.assertEqual(entries.created[0][1:4], (
+            'посмотреть фильм', expected_date, '18:00',
+        ))
+
+    def test_missing_title_is_not_filled_from_model_hallucination(self):
+        client = FakeModelClient([
+            {
+                'action': 'create_entry', 'kind': 'reminder',
+                'title': 'Письмо другу', 'time': '05:00',
+                'time_phrase': 'на пять утра',
+            },
+            {
+                'action': 'create_entry', 'kind': 'reminder',
+                'title': 'Письмо другу', 'date': '2026-11-03',
+                'date_phrase': '3 ноября', 'time': '06:00',
+                'time_phrase': 'на 6 утра',
+            },
+            {
+                'action': 'create_entry', 'kind': 'reminder',
+                'title': 'Написать письмо другу',
+            },
+        ])
+        entries = FakeEntries()
+        service = AssistantService(
+            ExternalCommandExtractor(client), entries, FakeConversations(),
+        )
+        first = service.handle_message(
+            'Создай напоминание на пять утра', 'Europe/Moscow', None,
+        )
+        self.assertEqual(first.status, AssistantStatus.needs_clarification)
+        self.assertIn('назвать', first.assistant_text)
+        self.assertEqual(entries.created, [])
+
+        second = service.handle_message(
+            '3 ноября на 6 утра', 'Europe/Moscow', first.conversation_id,
+        )
+        self.assertEqual(second.status, AssistantStatus.needs_clarification)
+        self.assertIn('назвать', second.assistant_text)
+        self.assertEqual(entries.created, [])
+
+        third = service.handle_message(
+            'Напомни написать письмо другу', 'Europe/Moscow', first.conversation_id,
+        )
+        self.assertEqual(third.status, AssistantStatus.completed)
+        self.assertEqual(len(entries.created), 1)
+        self.assertEqual(entries.created[0][1:4], (
+            'Написать письмо другу', datetime.date(2026, 11, 3), '06:00',
+        ))
 
     def test_external_extractor_rejects_bad_model_json(self):
         client = FakeModelClient({'action': 'delete_everything'})

@@ -6,7 +6,7 @@ import pydantic
 from src.ports.structured_model import StructuredModelClient
 from src.schemas.assistant import AssistantIntent
 from src.schemas.assistant_command import AssistantCommand
-from src.services.temporal import verify_creation_time
+from src.services.temporal import verify_creation_fields
 
 
 SYSTEM_PROMPT = """Извлеки команду пользователя для ассистента задач и встреч.
@@ -18,6 +18,9 @@ action: create_entry, list_entries, search_entries или unknown.
 задачи — kind=task; напоминания — kind=reminder. Например, «создай встречу
 с Иваном» и «покажи мои встречи сегодня» означают kind=meeting, а «найди
 напоминание про билеты» — kind=reminder. Для списка всех типов kind=null.
+Название записи выводи только из содержания последнего сообщения. Если пользователь
+сказал лишь тип, дату или время, title=null. Не бери название из истории диалога:
+незавершённые поля сервер хранит отдельно.
 Для date и time укажи date_phrase и time_phrase: точные фразы из последнего
 сообщения пользователя, на основании которых они получены. Если фразы нет,
 значение и соответствующая phrase должны быть null. Не подставляй время по
@@ -64,6 +67,12 @@ class ExternalCommandExtractor:
             command = AssistantCommand.model_validate(payload)
         except (pydantic.ValidationError, TypeError, ValueError) as exc:
             raise InvalidModelResponseError('Внешняя модель вернула некорректную команду') from exc
+        if previous is not None and previous.action == AssistantIntent.create_entry and command.action == AssistantIntent.unknown:
+            command = AssistantCommand(
+                action=AssistantIntent.create_entry, title=command.title,
+                date=command.date, date_phrase=command.date_phrase,
+                time=command.time, time_phrase=command.time_phrase,
+            )
         if command.action == AssistantIntent.create_entry:
-            command = verify_creation_time(command, text, today)
+            command = verify_creation_fields(command, text, today)
         return command

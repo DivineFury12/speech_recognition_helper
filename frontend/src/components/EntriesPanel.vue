@@ -9,7 +9,7 @@ const { period, items, loading, error } = storeToRefs(store)
 
 const tabs: { id: Period; label: string }[] = [
   { id: 'today', label: 'Сегодня' },
-  { id: 'week', label: 'Неделя' },
+  { id: 'week', label: 'На неделю' },
 ]
 
 onMounted(() => store.refresh())
@@ -26,6 +26,7 @@ onMounted(() => store.refresh())
           role="tab"
           :aria-selected="period === t.id"
           :class="{ active: period === t.id }"
+          :title="t.id === 'week' ? 'Сегодня и следующие 7 дней' : undefined"
           @click="store.setPeriod(t.id)"
         >
           {{ t.label }}

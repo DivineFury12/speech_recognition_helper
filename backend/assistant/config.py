@@ -40,7 +40,8 @@ def _ca_bundle() -> str:
 class Settings:
     llm_provider: str = field(default_factory=lambda: os.getenv("LLM_PROVIDER", "").strip().lower())
     db_path: str = field(default_factory=lambda: os.getenv("DB_PATH", "data/assistant.db"))
-    asr_enabled: bool = field(default_factory=lambda: _bool("ASR_ENABLED", True))
+    voice_enabled: bool = field(default_factory=lambda: _bool("VOICE_ENABLED", True))
+    asr_enabled: bool = field(default_factory=lambda: _bool("VOICE_ENABLED", True) and _bool("ASR_ENABLED", True))
     cors_origins: list[str] = field(
         default_factory=lambda: [o.strip() for o in os.getenv("CORS_ORIGINS", "").split(",") if o.strip()]
     )
@@ -63,7 +64,7 @@ class Settings:
             "/cache/embeddings" if os.path.isdir("/cache") else str(BACKEND_DIR / ".cache" / "embeddings"),
         )
     )
-    tts_enabled: bool = field(default_factory=lambda: _bool("TTS_ENABLED", True))
+    tts_enabled: bool = field(default_factory=lambda: _bool("VOICE_ENABLED", True) and _bool("TTS_ENABLED", True))
     tts_device: str = field(default_factory=lambda: os.getenv("TTS_DEVICE", "auto"))
     tts_model_dir: str = field(
         default_factory=lambda: os.getenv(

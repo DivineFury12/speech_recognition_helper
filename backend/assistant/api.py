@@ -125,6 +125,7 @@ class SessionInfo(BaseModel):
     unlocked: bool
     llm_provider: str
     asr_enabled: bool
+    voice_enabled: bool
 
 
 class UnlockRequest(BaseModel):
@@ -179,6 +180,7 @@ def get_session(request: Request):
         "unlocked": session.unlocked or not sessions.access_code,
         "llm_provider": request.app.state.llm_name,
         "asr_enabled": request.app.state.asr_ready(),
+        "voice_enabled": request.app.state.voice_enabled,
     }
 
 

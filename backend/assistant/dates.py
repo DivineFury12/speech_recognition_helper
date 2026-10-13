@@ -368,3 +368,78 @@ def mentions_hour(text: str, hour: int) -> bool:
     if re.search(r"\bпол\w*\s*день|полдень", t):
         numbers.add(12)
     return bool(candidates & numbers)
+
+
+SHIFT_UNITS = (("недел", 10080), ("дн", 1440), ("ден", 1440), ("сут", 1440), ("час", 60), ("мин", 1))
+SHIFT_RE = re.compile(
+    r"\b(?:на\s+(?:(" + NUM[1:-1] + r"|пол)\s*)?(недел\w*|дн\w*|день|сутки|час\w*|минут\w*)\s+(позже|раньше|вперед|назад|попозже|пораньше)"
+    r"|(позже|раньше|попозже|пораньше)\s+на\s+(?:(" + NUM[1:-1] + r"|пол)\s*)?(недел\w*|дн\w*|день|сутки|час\w*|минут\w*))\b"
+)
+
+
+DAYS_FORWARD_RE = re.compile(r"\bна\s+(?:" + NUM[1:-1] + r")\s+(?:дня|дней|день|сутки|суток)\b")
+
+
+def find_shift(text: str) -> Match | None:
+    t = normalize(text)
+    m = SHIFT_RE.search(t)
+    if not m:
+        days = DAYS_FORWARD_RE.search(t)
+        if days:
+            count = _num(re.search(NUM, days.group(0)).group(1))
+            return Match(count * 1440, days.span())
+        return None
+    amount, unit, direction = (m.group(1), m.group(2), m.group(3)) if m.group(2) else (m.group(5), m.group(6), m.group(4))
+    if amount == "пол":
+        count = 0.5
+    elif amount:
+        count = _num(amount)
+    else:
+        count = 1
+    minutes = next(v for prefix, v in SHIFT_UNITS if unit.startswith(prefix))
+    sign = -1 if direction in ("раньше", "назад", "пораньше") else 1
+    return Match(int(sign * count * minutes), m.span())
+
+
+def answer_changes(text: str, today: date) -> dict:
+    t = normalize(text)
+    changes: dict = {}
+    shift = find_shift(t)
+    if shift:
+        changes["shift_minutes"] = shift.value
+        t = t[: shift.span[0]] + " " * (shift.span[1] - shift.span[0]) + t[shift.span[1]:]
+    d = find_date(t, today)
+    if d:
+        changes["date"] = d.value.isoformat()
+    tm = find_time(t)
+    if tm:
+        changes["time"] = tm.value.strftime("%H:%M")
+    elif not shift:
+        answer = parse_time_answer(t) if not d else None
+        loose = answer or find_loose_time(t)
+        if loose:
+            changes["time"] = loose.strftime("%H:%M")
+    dur = find_duration(t)
+    if dur and not shift:
+        changes["duration_minutes"] = dur.value
+    return changes
+
+
+LOOSE_TIME_RE = re.compile(
+    r"\bна\s+" + NUM + r"(?:\s*[:.\s]\s*([0-5]\d))?\s*(?:час(?:а|ов)?)?\s*(утра|дня|вечера|ночи)?\s*$"
+)
+
+
+def find_loose_time(text: str) -> time | None:
+    m = LOOSE_TIME_RE.search(normalize(text))
+    if not m:
+        return None
+    hour = _num(m.group(1))
+    if hour > 23:
+        return None
+    part = m.group(3)
+    if part in ("дня", "вечера") and hour < 12:
+        hour += 12
+    elif part is None and 1 <= hour <= 6:
+        hour += 12
+    return time(hour, int(m.group(2)) if m.group(2) else 0)

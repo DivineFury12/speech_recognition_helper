@@ -177,3 +177,12 @@ def test_patch_recurrence_and_validation(client):
                                          "time": "10:00", "timezone": TZ}).json()
     assert m["duration_minutes"] == 60
     assert client.patch(f"/v1/entries/{m['id']}", json={"time": None}).status_code == 422
+
+
+def test_session_reports_voice_mode(client):
+    assert client.get("/v1/session").json()["voice_enabled"] is True
+    client.app.state.voice_enabled = False
+    try:
+        assert client.get("/v1/session").json()["voice_enabled"] is False
+    finally:
+        client.app.state.voice_enabled = True

@@ -8,7 +8,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from . import dates
 from .llm import LLMProvider
-from .nlu import ACTION_INTENTS, CREATE_RE, Parsed, parse, parse_rules
+from .nlu import ACTION_INTENTS, CREATE_RE, LIST_RE, PRONOUN_RE, SEARCH_RE, TRIGGER_RE, Parsed, parse, parse_rules
 from .search import lexical, search_entries, semantic, stems
 from .storage import DEFAULT_USER, Storage
 
@@ -47,6 +47,12 @@ HELP_TEXT = (
     "«Перенеси её на пятницу»."
 )
 MAX_CHOICES = 5
+ACTION_QUESTION = {
+    "update_entry": "Какую запись изменить?",
+    "delete_entry": "Какую запись удалить?",
+    "complete_entry": "Какую запись отметить выполненной?",
+}
+DONE_RE = re.compile(r"^(?:я\s+)?(?:уже\s+)?([а-я]+(?:л|ла|ли|ло))\s+(.{2,})$")
 
 
 class InvalidTimezone(ValueError):
@@ -132,6 +138,10 @@ class Assistant:
             result = self._on_confirm(text, draft, ctx)
         elif draft and draft["type"] == "choose":
             result = self._on_choose(text, draft, ctx)
+        elif draft and draft["type"] == "target":
+            result = self._on_target(text, draft, ctx)
+        elif draft and draft["type"] == "update":
+            result = self._on_update_answer(text, draft, ctx)
         else:
             parsed = parse(text, ctx.today, self.llm, draft["fields"] if draft else None)
             result = self._dispatch(parsed, text, ctx, draft)
@@ -167,6 +177,10 @@ class Assistant:
             return self._create(parsed, text, ctx, draft)
         if draft:
             self.storage.delete_draft(ctx.cid)
+        if parsed.intent in ("create_entry", "unknown"):
+            done = self._done_report(text, ctx)
+            if done:
+                return self._perform("complete_entry", done, {}, ctx)
         if parsed.intent == "create_entry":
             return self._create(parsed, text, ctx, None)
         if parsed.intent == "list_entries":
@@ -174,7 +188,7 @@ class Assistant:
         if parsed.intent == "search_entries":
             return self._search(parsed, text, ctx)
         if parsed.intent in ACTION_INTENTS:
-            return self._action(parsed, ctx)
+            return self._action(parsed, ctx, text)
         return self._turn(HELP_TEXT, "no_action", "unknown", [])
 
     @staticmethod
@@ -341,15 +355,17 @@ class Assistant:
         self.storage.delete_draft(ctx.cid)
         return self._dispatch(parse(text, ctx.today, self.llm), text, ctx, None)
 
-    def _targets(self, parsed: Parsed, ctx: Ctx) -> list[dict]:
+    def _targets(self, parsed: Parsed, ctx: Ctx, text: str = "") -> list[dict]:
         focus_ids = self.storage.get_context(ctx.cid).get("focus", [])
         focus = [e for e in (self.storage.get_entry(i, ctx.user_id) for i in focus_ids) if e]
         if parsed.kind:
             focus = [e for e in focus if e["kind"] == parsed.kind]
+        pronoun = bool(PRONOUN_RE.search(dates.normalize(text))) if text else not parsed.target
         if not parsed.target or not stems(parsed.target):
-            if focus or not parsed.target:
+            if pronoun or not parsed.target:
                 return focus
-            return self.storage.all_entries(parsed.kind, ctx.user_id)[:MAX_CHOICES + 1]
+            pool = [e for e in self.storage.all_entries(parsed.kind, ctx.user_id) if e["status"] == "pending"]
+            return self._upcoming(pool, ctx.today)[: MAX_CHOICES + 1]
         pool = self.storage.all_entries(parsed.kind, ctx.user_id)
         if parsed.intent == "complete_entry":
             pool.sort(key=lambda e: e["status"] == "completed")
@@ -363,34 +379,110 @@ class Assistant:
                 return hits[: MAX_CHOICES + 1]
         return semantic(parsed.target, pool, self.llm)[: MAX_CHOICES + 1] if self.llm else []
 
-    def _changes(self, parsed: Parsed, ctx: Ctx) -> dict[str, Any]:
-        changes = {k: v for k, v in self._resolve(parsed, ctx.now).items() if v}
+    @staticmethod
+    def _upcoming(entries: list[dict], today: date) -> list[dict]:
+        iso = today.isoformat()
+
+        def key(e: dict) -> tuple:
+            if e["date"] is None:
+                return (1, "", e["created_at"])
+            if e["date"] >= iso or e.get("recurrence"):
+                return (0, e["date"] + (e["time"] or ""), "")
+            return (2, "", e["date"])
+
+        return sorted(entries, key=key)
+
+    def _done_report(self, text: str, ctx: Ctx) -> dict | None:
+        m = DONE_RE.match(dates.normalize(text))
+        if not m:
+            return None
+        pending = [e for e in self.storage.all_entries(None, ctx.user_id) if e["status"] == "pending"]
+        ranked = lexical(text, pending)
+        if ranked and ranked[0][0] >= 0.66 and (len(ranked) == 1 or ranked[0][0] > ranked[1][0]):
+            return ranked[0][1]
+        return None
+
+    def _changes(self, parsed: Parsed, ctx: Ctx, text: str = "") -> dict[str, Any]:
+        changes = {k: v for k, v in self._resolve(parsed, ctx.now, text).items() if v}
         if parsed.new_title:
             changes["title"] = parsed.new_title[:1].upper() + parsed.new_title[1:]
         if parsed.duration_minutes:
             changes["duration_minutes"] = parsed.duration_minutes
         if parsed.recurrence:
             changes["recurrence"] = parsed.recurrence
+        if parsed.shift_minutes:
+            changes.pop("date", None)
+            changes.pop("time", None)
+            changes["shift_minutes"] = parsed.shift_minutes
+        if not changes and text:
+            changes = dates.answer_changes(text, ctx.today)
+        if "duration_minutes" not in changes and text and not changes.get("shift_minutes"):
+            dur = dates.find_duration(text)
+            if dur:
+                changes["duration_minutes"] = dur.value
         return changes
 
-    def _action(self, parsed: Parsed, ctx: Ctx) -> dict[str, Any]:
-        changes = self._changes(parsed, ctx) if parsed.intent == "update_entry" else {}
-        if parsed.intent == "update_entry" and not changes:
-            return self._turn("Что изменить? Например: «перенеси на завтра в 17:00» или «переименуй в …».",
-                              "no_action", parsed.intent, [])
-        targets = self._targets(parsed, ctx)
+    def _action(self, parsed: Parsed, ctx: Ctx, text: str = "") -> dict[str, Any]:
+        changes = self._changes(parsed, ctx, text) if parsed.intent == "update_entry" else {}
+        targets = self._targets(parsed, ctx, text)
         if not targets:
-            text = (f"Не нашёл запись «{parsed.target}»." if parsed.target
-                    else "Не понял, о какой записи речь. Назовите её, например: «перенеси встречу с Иваном на завтра».")
-            return self._turn(text, "no_action", parsed.intent, [])
+            if parsed.target and stems(parsed.target):
+                return self._turn(f"Не нашёл запись «{parsed.target}».", "no_action", parsed.intent, [])
+            draft = {"type": "target", "action": parsed.intent, "intent": parsed.intent, "changes": changes,
+                     "kind": parsed.kind}
+            return self._ask(ctx, draft, ACTION_QUESTION[parsed.intent])
+        return self._proceed(parsed.intent, targets, changes, ctx)
+
+    def _proceed(self, intent: str, targets: list[dict], changes: dict, ctx: Ctx) -> dict[str, Any]:
         if len(targets) > 1:
             choices = targets[:MAX_CHOICES]
             lines = [f"{i}. {_describe(e, ctx.today)}" for i, e in enumerate(choices, 1)]
-            draft = {"type": "choose", "action": parsed.intent, "intent": parsed.intent, "changes": changes,
+            draft = {"type": "choose", "action": intent, "intent": intent, "changes": changes,
                      "candidates": [e["id"] for e in choices]}
             question = "Нашёл несколько записей:\n" + "\n".join(lines) + "\nКакую вы имеете в виду?"
             return self._ask(ctx, draft, question, choices, [e["id"] for e in choices])
-        return self._perform(parsed.intent, targets[0], changes, ctx)
+        entry = targets[0]
+        if intent == "update_entry" and not changes:
+            return self._ask_update(entry, ctx)
+        return self._perform(intent, entry, changes, ctx)
+
+    def _ask_update(self, entry: dict, ctx: Ctx) -> dict[str, Any]:
+        draft = {"type": "update", "intent": "update_entry", "entry_id": entry["id"]}
+        question = (f"Что изменить у {KIND_SHORT[entry['kind']].replace('встреча', 'встречи').replace('задача', 'задачи')}"
+                    f" «{entry['title']}»? Назовите день, время или сдвиг, например «на пятницу в 15:00» или «на час позже».")
+        return self._ask(ctx, draft, question, [entry], [entry["id"]])
+
+    def _on_target(self, text: str, draft: dict, ctx: Ctx) -> dict[str, Any]:
+        rules = parse_rules(text, ctx.today)
+        t = dates.normalize(text)
+        new_command = (
+            (rules.intent in ACTION_INTENTS and rules.intent != draft["action"])
+            or TRIGGER_RE.match(text.strip()) or LIST_RE.search(t) or SEARCH_RE.search(t)
+        )
+        if new_command:
+            self.storage.delete_draft(ctx.cid)
+            return self._dispatch(parse(text, ctx.today, self.llm), text, ctx, None)
+        target = rules.target if rules.intent == draft["action"] and rules.target else text
+        probe = Parsed(intent=draft["action"], target=target, kind=draft.get("kind") or None)
+        targets = self._targets(probe, ctx, text)
+        if not targets:
+            return self._ask(ctx, draft, f"Не нашёл запись «{target}». Назовите её по-другому или скажите «отмена».")
+        self.storage.delete_draft(ctx.cid)
+        return self._proceed(draft["action"], targets, draft.get("changes", {}), ctx)
+
+    def _on_update_answer(self, text: str, draft: dict, ctx: Ctx) -> dict[str, Any]:
+        changes = dates.answer_changes(text, ctx.today)
+        if not changes:
+            rules = parse_rules(text, ctx.today)
+            if rules.intent == "update_entry":
+                changes = {k: v for k, v in self._changes(rules, ctx, text).items() if v}
+            elif rules.intent != "unknown":
+                self.storage.delete_draft(ctx.cid)
+                return self._dispatch(parse(text, ctx.today, self.llm), text, ctx, None)
+        if not changes:
+            return self._ask(ctx, draft, draft["question"])
+        self.storage.delete_draft(ctx.cid)
+        return self._commit_update(draft["entry_id"], changes, ctx)
 
     def _perform(self, intent: str, entry: dict, changes: dict, ctx: Ctx, confirmed: bool = False) -> dict[str, Any]:
         if intent == "update_entry":
@@ -401,6 +493,16 @@ class Assistant:
             draft = {"type": "confirm", "action": "delete", "intent": "delete_entry", "entry_id": entry["id"]}
             return self._ask(ctx, draft, f"Удалить {_describe(entry, ctx.today, accusative=True)}?", [entry], [entry["id"]])
         self.storage.delete_draft(ctx.cid)
+        if entry.get("recurrence") and entry.get("date"):
+            start = date.fromisoformat(entry["date"])
+            base = max(start, ctx.today)
+            upcoming = dates.occurrences(start, entry["recurrence"], base + timedelta(days=1), base + timedelta(days=400))
+            if upcoming:
+                moved = self.storage.update_entry(entry["id"], {"date": upcoming[0].isoformat(), "status": "pending"},
+                                                  ctx.user_id)
+                text = (f"Отметил: {KIND_SHORT[moved['kind']]} «{moved['title']}» за {dates.format_date(base)}. "
+                        f"Следующая — {dates.format_when(upcoming[0], None, ctx.today)}.")
+                return self._turn(text, "completed", "complete_entry", [moved], [moved["id"]])
         done = self.storage.update_entry(entry["id"], {"status": "completed"}, ctx.user_id)
         return self._turn(f"Отметил выполненной: {KIND_SHORT[done['kind']]} «{done['title']}».",
                           "completed", "complete_entry", [done], [done["id"]])
@@ -427,6 +529,8 @@ class Assistant:
             self.storage.delete_draft(ctx.cid)
             return self._dispatch(parse(text, ctx.today, self.llm), text, ctx, None)
         self.storage.delete_draft(ctx.cid)
+        if draft["action"] == "update_entry" and not draft.get("changes"):
+            return self._ask_update(pick, ctx)
         return self._perform(draft["action"], pick, draft.get("changes", {}), ctx, confirmed=True)
 
     def _commit_update(self, entry_id: str, changes: dict, ctx: Ctx, force: bool = False) -> dict[str, Any]:
@@ -434,6 +538,19 @@ class Assistant:
         if entry is None:
             self.storage.delete_draft(ctx.cid)
             return self._turn("Этой записи уже нет.", "no_action", "update_entry", [])
+        changes = dict(changes)
+        shift = changes.pop("shift_minutes", None)
+        if shift:
+            if not entry.get("date"):
+                self.storage.delete_draft(ctx.cid)
+                return self._turn(f"У записи «{entry['title']}» нет даты — назовите день и время.",
+                                  "no_action", "update_entry", [entry])
+            start = datetime.combine(date.fromisoformat(entry["date"]),
+                                     time.fromisoformat(entry["time"]) if entry.get("time") else time(0, 0))
+            moved = start + timedelta(minutes=shift)
+            changes["date"] = moved.date().isoformat()
+            if entry.get("time"):
+                changes["time"] = moved.strftime("%H:%M")
         merged = {**entry, **changes}
         self._fill_date(merged, ctx.now)
         changes = {k: merged[k] for k in set(changes) | {"date"} if merged.get(k) != entry.get(k)}

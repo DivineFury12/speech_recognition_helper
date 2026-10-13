@@ -16,7 +16,7 @@ const mocks = import.meta.env.VITE_USE_MOCKS === 'true'
 const HEALTH_INTERVAL_MS = 30_000
 
 const session = useSessionStore()
-const { loaded, unlocked } = storeToRefs(session)
+const { loaded, unlocked, voiceEnabled } = storeToRefs(session)
 const entries = useEntriesStore()
 
 const health = ref<'unknown' | 'ok' | 'down'>('unknown')
@@ -98,7 +98,7 @@ onBeforeUnmount(() => {
       </div>
       <div class="meta">
         <span v-if="mocks" class="badge">моки</span>
-        <VoicePicker />
+        <VoicePicker v-if="voiceEnabled" />
         <button
           v-if="unlocked && loaded"
           type="button"

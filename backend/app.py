@@ -83,6 +83,8 @@ def _warm_up(model) -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    if not settings.voice_enabled:
+        log.info("Голос выключен (VOICE_ENABLED=false): работаем только с текстом")
     if settings.asr_enabled:
         try:
             load_asr()
@@ -132,6 +134,7 @@ app.state.assistant_limiter = RateLimiter(settings.rate_limit_per_minute, 60)
 app.state.unlock_limiter = RateLimiter(10, 600)
 app.state.tts_limiter = RateLimiter(60, 60)
 app.state.tts = None
+app.state.voice_enabled = settings.voice_enabled
 app.state.asr_ready = lambda: "model" in ml and FFMPEG is not None
 app.state.llm_name = "rules"
 app.add_middleware(SessionMiddleware, sessions=sessions, cookie_secure=settings.cookie_secure)

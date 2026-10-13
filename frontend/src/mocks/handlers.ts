@@ -178,6 +178,7 @@ export const handlers = [
       unlocked: true,
       llm_provider: 'mock',
       asr_enabled: true,
+      voice_enabled: true,
     }),
   ),
 

@@ -1,6 +1,7 @@
 ﻿param(
     [switch]$Prod,
-    [switch]$NoBrowser
+    [switch]$NoBrowser,
+    [switch]$NoVoice
 )
 
 $ErrorActionPreference = "Stop"
@@ -45,7 +46,7 @@ if (-not (Test-Path (Join-Path $frontend "node_modules"))) {
 }
 
 $xtts = Join-Path $backend ".cache\tts\xtts_v2\model.pth"
-if (-not (Test-Path $xtts)) {
+if (-not $NoVoice -and -not (Test-Path $xtts)) {
     & $python -c "import torch, TTS" 2>$null
     if ($LASTEXITCODE -eq 0) {
         Step "Скачиваю модели озвучки и поиска по смыслу (около 2,5 ГБ, только при первом запуске)"
@@ -57,7 +58,8 @@ if (-not (Test-Path $xtts)) {
     }
 }
 
-$backendCmd ="Set-Location '$backend'; & '$python' -m uvicorn app:app --host 127.0.0.1 --port 8000"
+$voiceEnv = if ($NoVoice) { "`$env:VOICE_ENABLED = 'false'; " } else { "" }
+$backendCmd = "$voiceEnv`Set-Location '$backend';& '$python' -m uvicorn app:app --host 127.0.0.1 --port 8000"
 
 if ($Prod) {
     Step "Собираю фронтенд"

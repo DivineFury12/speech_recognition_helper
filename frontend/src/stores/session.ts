@@ -8,6 +8,7 @@ export const useSessionStore = defineStore('session', () => {
   const accessRequired = ref(false)
   const llmProvider = ref<string | null>(null)
   const asrEnabled = ref<boolean | null>(null)
+  const voiceEnabled = ref(true)
   const error = ref<string | null>(null)
   const unlocking = ref(false)
 
@@ -23,6 +24,7 @@ export const useSessionStore = defineStore('session', () => {
       accessRequired.value = s.access_code_required
       llmProvider.value = s.llm_provider
       asrEnabled.value = s.asr_enabled
+      voiceEnabled.value = s.voice_enabled
       error.value = null
     } catch (e) {
       error.value = e instanceof Error ? e.message : 'Не удалось получить сессию'
@@ -46,5 +48,5 @@ export const useSessionStore = defineStore('session', () => {
     }
   }
 
-  return { loaded, unlocked, accessRequired, llmProvider, asrEnabled, error, unlocking, load, unlock }
+  return { loaded, unlocked, accessRequired, llmProvider, asrEnabled, voiceEnabled, error, unlocking, load, unlock }
 })

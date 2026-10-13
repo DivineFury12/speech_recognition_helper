@@ -32,6 +32,7 @@ class Parsed:
     query: str | None = None
     target: str | None = None
     new_title: str | None = None
+    shift_minutes: int | None = None
     source: str = "rules"
     notes: list[str] = field(default_factory=list)
 
@@ -54,7 +55,7 @@ COMPLETE_RE = re.compile(
 )
 UPDATE_RE = re.compile(
     r"^(?:пожалуйста\s+)?(?:а\s+)?(?:перенеси(?:те)?|передвинь|сдвинь|измени|поменяй|переименуй|перепиши|"
-    r"поставь\s+(?:е[её]|его)\s+на)\b"
+    r"поставь\s+(?:е[её]|его)\s+на|сделай\s+(?:е[её]|его|эту|этот))\b"
 )
 RENAME_RE = re.compile(r"\bпереименуй\w*\s+(.*?)\s*\bв\s+[«\"]?(.+?)[»\"]?\s*$", re.I)
 PRONOUN_RE = re.compile(r"\b(?:е[её]|его|это|эту|этот|эта|их|него|нее|неё)\b")
@@ -69,7 +70,7 @@ TRIGGER_RE = re.compile(
 )
 ACTION_TRIGGER_RE = re.compile(
     r"^(?:пожалуйста\s+)?(?:а\s+)?(?:удали(?:ть|те)?|убери|сотри|отмени(?:ть|те)?|перенеси(?:те)?|передвинь|сдвинь|"
-    r"измени|поменяй|перепиши|отметь|пометь|я\s+сделал\w*|сделал\w*|выполнил\w*|закончил\w*)\s*",
+    r"измени|поменяй|перепиши|отметь|пометь|сделай|я\s+сделал\w*|сделал\w*|выполнил\w*|закончил\w*)\s*",
     re.I,
 )
 ACTION_TAIL_RE = re.compile(r"\s*(?:как\s+)?(?:выполненн\w*|сделанн\w*|готов\w*)\s*$", re.I)
@@ -142,12 +143,25 @@ def parse_rules(text: str, today: date) -> Parsed:
             new_title = _clean_spaces(rename.group(2))
             original = original[: rename.start()] + " " + rename.group(1)
             t = original.lower()
+        shift_m = dates.find_shift(t) if action == "update_entry" else None
+        if shift_m:
+            original = _cut(original, shift_m.span)
+            t = original.lower().replace("ё", "е")
+        loose_time = None
+        if action == "update_entry" and not shift_m and not dates.find_time(t):
+            loose = dates.LOOSE_TIME_RE.search(t)
+            if loose:
+                loose_time = dates.find_loose_time(t)
+                original = _cut(original, loose.span())
+                t = original.lower().replace("ё", "е")
         rest, rec_m, date_m, time_m, dur_m = _strip_when(original, t, today)
         rest = ACTION_TRIGGER_RE.sub("", rest)
         rest = ACTION_TAIL_RE.sub("", rest)
         rest = re.sub(r"\b(?:на|в|к)\s*$", "", rest.strip())
         target_text = _clean_spaces(PRONOUN_RE.sub(" ", rest))
         date_phrase, time_phrase = _phrases(t, date_m, time_m) if action == "update_entry" else (None, None)
+        if loose_time and not time_phrase:
+            time_phrase = loose_time.strftime("%H:%M")
         return Parsed(
             intent=action,
             kind=_kind_mentioned(target_text.lower()),
@@ -157,6 +171,7 @@ def parse_rules(text: str, today: date) -> Parsed:
             time_phrase=time_phrase,
             duration_minutes=dur_m.value if dur_m and action == "update_entry" else None,
             recurrence=rec_m.value if rec_m and action == "update_entry" else None,
+            shift_minutes=shift_m.value if shift_m else None,
         )
 
     if SEARCH_RE.search(t):
@@ -215,6 +230,8 @@ SYSTEM_PROMPT = """Ты разбираешь команды голосового
 - "target": для update/delete/complete — какую запись менять, своими словами («встреча с Иваном», «задача про отчёт»).
   null, если пользователь говорит «её», «его», «эту» про запись из предыдущего ответа.
 - "new_title": для update_entry — новое название, если пользователь переименовывает, иначе null.
+- "shift_minutes": для update_entry — сдвиг в минутах относительно текущего времени записи («на час позже» = 60, «на полчаса раньше» = -30, «на день позже» = 1440), иначе null.
+Если пользователь сообщает, что уже сделал дело («я купил молоко», «позвонил маме»), это complete_entry с target = это дело.
 
 Для update_entry date_phrase/time_phrase/date/time — это НОВЫЕ дата и время.
 Не придумывай дату и время, если их нет в запросе.
@@ -228,6 +245,8 @@ SYSTEM_PROMPT = """Ты разбираешь команды голосового
 «Когда у меня была встреча с Иваном?» → {"intent":"search_entries","kind":"meeting","title":null,"date_phrase":null,"time_phrase":null,"date":null,"time":null,"duration_minutes":null,"recurrence":null,"period_phrase":null,"query":"встреча с Иваном","target":null,"new_title":null}
 «А перенеси её на завтра» → {"intent":"update_entry","kind":null,"title":null,"date_phrase":"на завтра","time_phrase":null,"date":"2026-10-10","time":null,"duration_minutes":null,"recurrence":null,"period_phrase":null,"query":null,"target":null,"new_title":null}
 «Перенеси встречу с дизайнером на 17:00» → {"intent":"update_entry","kind":"meeting","title":null,"date_phrase":null,"time_phrase":"на 17:00","date":null,"time":"17:00","duration_minutes":null,"recurrence":null,"period_phrase":null,"query":null,"target":"встреча с дизайнером","new_title":null}
+«Сдвинь её на час позже» → {"intent":"update_entry","kind":null,"title":null,"date_phrase":null,"time_phrase":null,"date":null,"time":null,"duration_minutes":null,"recurrence":null,"period_phrase":null,"query":null,"target":null,"new_title":null,"shift_minutes":60}
+«Я купил молоко» → {"intent":"complete_entry","kind":"task","title":null,"date_phrase":null,"time_phrase":null,"date":null,"time":null,"duration_minutes":null,"recurrence":null,"period_phrase":null,"query":null,"target":"купить молоко","new_title":null,"shift_minutes":null}
 «Удали напоминание про таблетки» → {"intent":"delete_entry","kind":"reminder","title":null,"date_phrase":null,"time_phrase":null,"date":null,"time":null,"duration_minutes":null,"recurrence":null,"period_phrase":null,"query":null,"target":"напоминание про таблетки","new_title":null}
 «Отметь задачу про отчёт выполненной» → {"intent":"complete_entry","kind":"task","title":null,"date_phrase":null,"time_phrase":null,"date":null,"time":null,"duration_minutes":null,"recurrence":null,"period_phrase":null,"query":null,"target":"задача про отчёт","new_title":null}
 """
@@ -277,6 +296,7 @@ def _from_llm(data: dict) -> Parsed:
         query=_str(data.get("query")),
         target=_str(data.get("target")),
         new_title=_str(data.get("new_title")),
+        shift_minutes=data.get("shift_minutes") if isinstance(data.get("shift_minutes"), int) and data.get("shift_minutes") else None,
         source="llm",
     )
 
@@ -305,6 +325,12 @@ def parse(text: str, today: date, llm: LLMProvider | None, draft: dict | None = 
             parsed.kind = parsed.kind or rules.kind
     if parsed.intent == "update_entry" and not parsed.new_title and rules.intent == "update_entry":
         parsed.new_title = rules.new_title
+    if parsed.intent in ACTION_INTENTS:
+        if not parsed.target:
+            candidate = parsed.query or (parsed.title if parsed.title != parsed.new_title else None)
+            parsed.target = candidate or (rules.target if rules.intent == parsed.intent else None)
+        if parsed.intent == "update_entry" and not parsed.shift_minutes:
+            parsed.shift_minutes = rules.shift_minutes if rules.intent == "update_entry" else dates.find_shift(text) and dates.find_shift(text).value
     if parsed.intent == "search_entries" and not parsed.query:
         parsed.query = rules.query or text
     if parsed.intent == "list_entries" and not parsed.period_phrase:

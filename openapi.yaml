@@ -724,7 +724,7 @@ components:
             $ref: '#/components/schemas/VoiceInfo'
     SessionInfo:
       type: object
-      required: [user_id, access_code_required, unlocked, llm_provider, asr_enabled]
+      required: [user_id, access_code_required, unlocked, llm_provider, asr_enabled, voice_enabled]
       properties:
         user_id:
           type: string
@@ -738,6 +738,9 @@ components:
           example: gigachat
         asr_enabled:
           type: boolean
+        voice_enabled:
+          type: boolean
+          description: false — сервер запущен без голоса (VOICE_ENABLED=false), только текст
     Entry:
       type: object
       description: Статус выполнения и дата изменения не обязательны для MVP.

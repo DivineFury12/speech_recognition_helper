@@ -2,12 +2,14 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { storeToRefs } from 'pinia'
 import { useChatStore } from '@/stores/chat'
+import { useSessionStore } from '@/stores/session'
 import { MAX_RECORD_SECONDS, useRecorder } from '@/composables/useRecorder'
 import { stopSpeech } from '@/composables/useSpeech'
 import EntryItem from './EntryItem.vue'
 
 const chat = useChatStore()
 const { messages, sending, awaiting, retryLast } = storeToRefs(chat)
+const { voiceEnabled } = storeToRefs(useSessionStore())
 
 const draft = ref('')
 const listEl = ref<HTMLElement | null>(null)
@@ -17,7 +19,7 @@ const recorder = useRecorder(({ blob, filename }) => chat.sendAudio(blob, filena
 const { isRecording, elapsed, error: recError } = recorder
 
 const hasText = computed(() => draft.value.trim().length > 0)
-const mode = computed<'send' | 'mic'>(() => (isRecording.value || hasText.value ? 'send' : 'mic'))
+const mode = computed<'send' | 'mic'>(() => (isRecording.value || hasText.value || !voiceEnabled.value ? 'send' : 'mic'))
 const timer = computed(() => `${Math.floor(elapsed.value / 60)}:${String(elapsed.value % 60).padStart(2, '0')}`)
 const actionLabel = computed(() => {
   if (sending.value) return 'Отправляю'
@@ -36,6 +38,7 @@ function primary() {
     draft.value = ''
     return
   }
+  if (!voiceEnabled.value) return
   stopSpeech()
   void recorder.start()
 }
@@ -136,7 +139,7 @@ watch(
         type="submit"
         class="round-btn"
         :class="{ recording: isRecording, busy: sending }"
-        :disabled="sending || (mode === 'mic' && !recorder.supported)"
+        :disabled="sending || (mode === 'mic' && !recorder.supported) || (!voiceEnabled && !hasText)"
         :aria-label="actionLabel"
         :title="mode === 'mic' && !recorder.supported ? 'Браузер не поддерживает запись' : actionLabel"
       >

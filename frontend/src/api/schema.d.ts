@@ -438,6 +438,8 @@ export interface components {
             /** @example gigachat */
             llm_provider: string;
             asr_enabled: boolean;
+            /** @description false — сервер запущен без голоса (VOICE_ENABLED=false), только текст */
+            voice_enabled: boolean;
         };
         /** @description Статус выполнения и дата изменения не обязательны для MVP. */
         Entry: {

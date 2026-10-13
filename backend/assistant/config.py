@@ -73,6 +73,7 @@ class Settings:
             "/cache/tts/silero" if os.path.isdir("/cache") else str(BACKEND_DIR / ".cache" / "tts" / "silero"),
         )
     )
+    google_enabled: bool = field(default_factory=lambda: _bool("GOOGLE_ENABLED", False))
     google_client_id: str = field(default_factory=lambda: os.getenv("GOOGLE_CLIENT_ID", "").strip())
     google_client_secret: str = field(default_factory=lambda: os.getenv("GOOGLE_CLIENT_SECRET", "").strip())
     google_origins: list[str] = field(

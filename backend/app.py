@@ -149,7 +149,7 @@ async def lifespan(app: FastAPI):
         threading.Thread(target=tts.load, daemon=True).start()
         log.info("Озвучка: загружаю Silero в фоне (голоса: %s)", ", ".join(v.name for v in tts.voices()))
     app.state.google = None
-    if settings.google_client_id and settings.google_client_secret:
+    if settings.google_enabled and settings.google_client_id and settings.google_client_secret:
         from assistant.google_calendar import GoogleCalendar
 
         app.state.google = GoogleCalendar(storage, sessions.secret, settings.google_client_id,

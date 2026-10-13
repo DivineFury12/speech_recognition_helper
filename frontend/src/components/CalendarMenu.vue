@@ -105,8 +105,8 @@ onBeforeUnmount(() => document.removeEventListener('click', onDocumentClick))
       </svg>
     </button>
     <div v-show="open" class="menu" role="menu" aria-label="Календарь">
-      <div class="menu-title">Google Календарь</div>
       <template v-if="google.configured">
+        <div class="menu-title">Google Календарь</div>
         <button v-if="!google.connected" type="button" class="menu-item" role="menuitem" :disabled="busy" @click="connect">
           Подключить
           <small>записи сразу появятся в календаре «Ассистент» на телефоне</small>
@@ -115,10 +115,9 @@ onBeforeUnmount(() => document.removeEventListener('click', onDocumentClick))
           Отключить
           <small>подключён, записи синхронизируются</small>
         </button>
+        <div class="voice-divider" />
       </template>
-      <p v-else class="menu-note">Не настроен на сервере — инструкция в README, раздел «Google Календарь».</p>
-      <div class="voice-divider" />
-      <div class="menu-title">Другие календари</div>
+      <div class="menu-title">Календарь</div>
       <button type="button" class="menu-item" role="menuitem" :disabled="busy" @click="download">
         Скачать файл .ics
         <small>для Apple, Outlook или любого календаря</small>

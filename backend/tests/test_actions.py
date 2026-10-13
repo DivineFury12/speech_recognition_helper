@@ -139,3 +139,24 @@ def test_delete_series_by_name(say):
     assert "Стендап" in ask["assistant_text"]
     say("да")
     assert [e["title"] for e in say.a.storage.all_entries()] == ["Планёрка"]
+
+
+@pytest.mark.parametrize("reply", ["жа", "lf", "Да!", "ага"])
+def test_delete_confirm_tolerates_typos(say, reply):
+    say("Поставь встречу с командой завтра в 10")
+    say("Удали встречу с командой")
+    assert say(reply)["intent"] == "delete_entry"
+    assert say.a.storage.all_entries() == []
+
+
+def test_unclear_confirm_reply_keeps_question(say):
+    say("Поставь встречу с командой завтра в 10")
+    say("Удали встречу с командой")
+    again = say("ээ")
+    assert again["status"] == "needs_clarification" and "Ответьте «да» или «нет»" in again["assistant_text"]
+    assert say("да")["intent"] == "delete_entry"
+
+
+def test_bare_yes_without_question(say):
+    turn = say("да")
+    assert "ничего не спрашивал" in turn["assistant_text"]

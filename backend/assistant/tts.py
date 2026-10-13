@@ -119,6 +119,9 @@ def _wav_bytes(samples) -> bytes:
     return buf.getvalue()
 
 
+GENERATION = {"temperature": 0.55, "top_p": 0.8, "repetition_penalty": 5.0}
+
+
 class XttsEngine:
     def __init__(self, model_dir: str, voices_dir: str, device: str = "auto") -> None:
         self.model_dir = Path(model_dir)
@@ -200,8 +203,7 @@ class XttsEngine:
             parts = []
             for chunk in split_for_tts(spoken):
                 out = self._model.inference(
-                    chunk, "ru", latent, emb, temperature=0.55, top_p=0.8,
-                    repetition_penalty=5.0, enable_text_splitting=False,
+                    chunk, "ru", latent, emb, enable_text_splitting=False, **GENERATION,
                 )
                 parts += [np.asarray(out["wav"], dtype="float32"), pause]
             audio = studio(_wav_bytes(np.concatenate(parts[:-1])))

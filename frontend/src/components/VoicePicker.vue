@@ -4,6 +4,7 @@ import { BROWSER_VOICE, VOICE_OFF, useSpeech } from '@/composables/useSpeech'
 
 const {
   voice,
+  volume,
   enabled,
   currentName,
   serverVoices,
@@ -106,6 +107,12 @@ onBeforeUnmount(() => document.removeEventListener('click', onDocumentClick))
           <svg v-else viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path fill="currentColor" d="M8 5v14l11-7z" /></svg>
         </button>
       </div>
+      <div class="voice-divider" />
+      <label class="voice-volume">
+        <span>Громкость</span>
+        <input v-model.number="volume" type="range" min="0" max="1" step="0.05" aria-label="Громкость озвучки" />
+        <span class="voice-volume-value">{{ Math.round(volume * 100) }}%</span>
+      </label>
       <div class="voice-divider" />
       <div class="voice-option" :class="{ selected: voice === VOICE_OFF }" role="option" :aria-selected="voice === VOICE_OFF">
         <button type="button" class="voice-choose" @click="choose(VOICE_OFF)">

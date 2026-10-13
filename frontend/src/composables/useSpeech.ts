@@ -19,7 +19,17 @@ function readVoice(): string {
   }
 }
 
+function readVolume(): number {
+  try {
+    const saved = Number(localStorage.getItem('speech-volume'))
+    return localStorage.getItem('speech-volume') !== null && saved >= 0 && saved <= 1 ? saved : 1
+  } catch {
+    return 1
+  }
+}
+
 const voice = ref(readVoice())
+const volume = ref(readVolume())
 const serverVoices = ref<VoiceInfo[]>([])
 const serverAvailable = ref(false)
 const serverLoading = ref(false)
@@ -36,6 +46,13 @@ watch(voice, (v) => {
     localStorage.setItem(STORAGE_KEY, v)
   } catch {}
   if (v === VOICE_OFF) stop()
+})
+
+watch(volume, (v) => {
+  try {
+    localStorage.setItem('speech-volume', String(v))
+  } catch {}
+  if (audio) audio.volume = v
 })
 
 const enabled = computed(() => voice.value !== VOICE_OFF)
@@ -82,6 +99,7 @@ function speakBrowser(text: string) {
   if (!browserSupported) return
   const utterance = new SpeechSynthesisUtterance(cleanText(text))
   utterance.lang = 'ru-RU'
+  utterance.volume = volume.value
   const ru = window.speechSynthesis.getVoices().find((v) => v.lang.toLowerCase().startsWith('ru'))
   if (ru) utterance.voice = ru
   utterance.onend = () => (speaking.value = false)
@@ -108,6 +126,7 @@ function playBlob(blob: Blob, id: number): Promise<void> {
     if (id !== requestId) return resolve()
     audioUrl = URL.createObjectURL(blob)
     audio = new Audio(audioUrl)
+    audio.volume = volume.value
     const done = () => {
       if (audioUrl) URL.revokeObjectURL(audioUrl)
       audioUrl = null
@@ -186,6 +205,7 @@ function preview(voiceId: string) {
 export function useSpeech() {
   return {
     voice,
+    volume,
     enabled,
     currentName,
     serverVoices,

@@ -39,6 +39,50 @@ YES_RE = re.compile(
     r"^\s*(?:да|ага|угу|ок|окей|давай|конечно|верно|подтверждаю|ставь|удаляй|удали|всё равно|все равно|пусть)\b", re.I
 )
 NO_RE = re.compile(r"^\s*(?:нет|не надо|не нужно|не ставь|не удаляй|не)\b", re.I)
+YES_WORDS = ("да", "ага", "угу", "ок", "окей", "давай", "конечно", "верно", "удаляй", "ставь", "подтверждаю")
+NO_WORDS = ("нет", "неа", "не")
+KEY_NEIGHBORS = {"д": "лжщзюб", "н": "екгро"}
+EN_TO_RU = str.maketrans("qwertyuiop[]asdfghjkl;'zxcvbnm,.`", "йцукенгшщзхъфывапролджэячсмитьбюё")
+
+
+def _edit_distance(a: str, b: str) -> int:
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        cur = [i]
+        for j, cb in enumerate(b, 1):
+            cur.append(min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (ca != cb)))
+        prev = cur
+    return prev[-1]
+
+
+def yes_no(text: str) -> str | None:
+    if YES_RE.match(text):
+        return "yes"
+    if NO_RE.match(text):
+        return "no"
+    words = re.findall(r"[a-zа-яё\[\];',.`]+", text.lower())
+    if not words or len(words) > 2:
+        return None
+    word = words[0]
+    if re.fullmatch(r"[a-z\[\];',.`]+", word):
+        word = word.translate(EN_TO_RU)
+    word = word.replace("ё", "е")
+    for answer, vocab in (("yes", YES_WORDS), ("no", NO_WORDS)):
+        if word in vocab:
+            return answer
+    if len(word) == 2:
+        for answer, w in (("yes", "да"), ("no", "не")):
+            if word[1] == w[1] and word[0] in KEY_NEIGHBORS.get(w[0], ""):
+                return answer
+        return None
+    if len(word) <= 7:
+        best = min(((_edit_distance(word, w), answer) for answer, vocab in (("yes", YES_WORDS), ("no", NO_WORDS))
+                    for w in vocab if len(w) >= 3), default=(9, None))
+        if best[0] <= 1:
+            return best[1]
+    return None
+
+
 ORDINALS = {"перв": 1, "втор": 2, "трет": 3, "четв": 4, "пят": 5, "последн": -1}
 HELP_TEXT = (
     "Я умею создавать задачи, напоминания и встречи (в том числе повторяющиеся), показывать записи за период, "
@@ -189,6 +233,9 @@ class Assistant:
             return self._search(parsed, text, ctx)
         if parsed.intent in ACTION_INTENTS:
             return self._action(parsed, ctx, text)
+        if yes_no(text):
+            return self._turn("Сейчас я ничего не спрашивал. Скажите команду целиком, например «Удали встречу с Иваном».",
+                              "no_action", "unknown", [])
         return self._turn(HELP_TEXT, "no_action", "unknown", [])
 
     @staticmethod
@@ -343,17 +390,23 @@ class Assistant:
                 if action == "create":
                     return self._commit_create({**draft["fields"], **new}, ctx)
                 return self._commit_update(draft["entry_id"], {**draft["changes"], **new}, ctx)
-        if YES_RE.match(text):
+        answer = yes_no(text)
+        if answer == "yes":
             if action == "create":
                 return self._commit_create(draft["fields"], ctx, force=True)
             if action == "update":
                 return self._commit_update(draft["entry_id"], draft["changes"], ctx, force=True)
             return self._commit_delete(draft["entry_id"], ctx)
-        if NO_RE.match(text):
+        if answer == "no":
             self.storage.delete_draft(ctx.cid)
             return self._turn("Хорошо, не буду.", "no_action", draft["intent"], [])
+        parsed = parse(text, ctx.today, self.llm)
+        words = len(text.split())
+        if (parsed.intent == "unknown" and words <= 3) or (words <= 2 and parsed.intent != "create_entry"):
+            question = draft["question"].split(" Ответьте")[0]
+            return self._ask(ctx, draft, f"Не понял ответ. {question} Ответьте «да» или «нет».")
         self.storage.delete_draft(ctx.cid)
-        return self._dispatch(parse(text, ctx.today, self.llm), text, ctx, None)
+        return self._dispatch(parsed, text, ctx, None)
 
     def _targets(self, parsed: Parsed, ctx: Ctx, text: str = "") -> list[dict]:
         focus_ids = self.storage.get_context(ctx.cid).get("focus", [])

@@ -880,6 +880,11 @@ components:
     EntryStatus:
       type: string
       enum: [pending, completed, cancelled]
+    Priority:
+      type: string
+      enum: [high, normal]
+      nullable: true
+      description: high — важная запись.
     Recurrence:
       type: string
       nullable: true
@@ -1009,6 +1014,8 @@ components:
           minimum: 0
           nullable: true
           description: За сколько минут до начала напомнить; null — по умолчанию.
+        priority:
+          $ref: '#/components/schemas/Priority'
         status:
           $ref: '#/components/schemas/EntryStatus'
         created_at:
@@ -1048,6 +1055,12 @@ components:
         remind_minutes:
           type: integer
           minimum: 0
+          nullable: true
+        priority:
+          $ref: '#/components/schemas/Priority'
+        recurrence_until:
+          type: string
+          format: date
           nullable: true
     EntryUpdate:
       type: object
@@ -1089,6 +1102,8 @@ components:
           minimum: 0
           nullable: true
           description: За сколько минут до начала напомнить; null — по умолчанию.
+        priority:
+          $ref: '#/components/schemas/Priority'
         status:
           $ref: '#/components/schemas/EntryStatus'
     EntryList:

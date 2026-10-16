@@ -371,3 +371,17 @@ class OnlyThisSurvivesClarification(unittest.TestCase):
         days = [e.date for e in chat.entries.list_period(TODAY, TODAY + datetime.timedelta(days=20))]
         self.assertNotIn(monday, days)
         self.assertIn(monday + datetime.timedelta(days=7), days)
+
+
+class PriorityTests(unittest.TestCase):
+    def test_important_on_create_and_mark_later(self):
+        chat = Chat([command(action='create_entry', kind='task', title='важную задачу сдать отчёт')])
+        created = chat('Поставь важную задачу сдать отчёт')
+        self.assertEqual(created.entries[0].priority, 'high')
+        self.assertIn('важное', created.assistant_text)
+        other = chat.entries.create(kind=EntryKind.task, title='Купить хлеб', date=None, time=None, timezone=TZ)
+        marked = chat('Пометь купить хлеб как важную')
+        self.assertEqual(chat.repository.get(other.id).priority, 'high')
+        self.assertIn('важное', marked.assistant_text)
+        chat('Сними важность с купить хлеб')
+        self.assertEqual(chat.repository.get(other.id).priority, 'normal')

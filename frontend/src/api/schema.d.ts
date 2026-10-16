@@ -523,6 +523,11 @@ export interface components {
         /** @enum {string} */
         EntryStatus: "pending" | "completed" | "cancelled";
         /**
+         * @description high — важная запись.
+         * @enum {string|null}
+         */
+        Priority: "high" | "normal" | null;
+        /**
          * @description Повтор записи; null — разовая.
          * @enum {string|null}
          */
@@ -593,6 +598,7 @@ export interface components {
             exdates?: string[] | null;
             /** @description За сколько минут до начала напомнить; null — по умолчанию. */
             remind_minutes?: number | null;
+            priority?: components["schemas"]["Priority"];
             status?: components["schemas"]["EntryStatus"];
             /**
              * Format: date-time
@@ -616,6 +622,9 @@ export interface components {
             duration_minutes?: number | null;
             recurrence?: components["schemas"]["Recurrence"];
             remind_minutes?: number | null;
+            priority?: components["schemas"]["Priority"];
+            /** Format: date */
+            recurrence_until?: string | null;
         };
         EntryUpdate: {
             title?: string;
@@ -634,6 +643,7 @@ export interface components {
             exdates?: string[] | null;
             /** @description За сколько минут до начала напомнить; null — по умолчанию. */
             remind_minutes?: number | null;
+            priority?: components["schemas"]["Priority"];
             status?: components["schemas"]["EntryStatus"];
         };
         EntryList: {

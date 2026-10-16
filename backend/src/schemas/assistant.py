@@ -25,6 +25,11 @@ class Recurrence(str, enum.Enum):
     monthly = 'monthly'
 
 
+class Priority(str, enum.Enum):
+    high = 'high'
+    normal = 'normal'
+
+
 class AssistantStatus(str, enum.Enum):
     completed = 'completed'
     needs_clarification = 'needs_clarification'
@@ -53,6 +58,7 @@ class Entry(pydantic.BaseModel):
     recurrence_until: datetime.date | None = None
     exdates: list[datetime.date] | None = None
     remind_minutes: int | None = None
+    priority: Priority | None = None
     status: EntryStatus | None = None
     created_at: datetime.datetime
     updated_at: datetime.datetime | None = None
@@ -74,6 +80,7 @@ class EntryUpdate(pydantic.BaseModel):
     recurrence_until: datetime.date | None = None
     exdates: list[datetime.date] | None = None
     remind_minutes: int | None = pydantic.Field(default=None, ge=0, le=10080)
+    priority: Priority | None = None
     status: EntryStatus | None = None
 
     @pydantic.model_validator(mode='after')
@@ -100,6 +107,8 @@ class EntryCreate(pydantic.BaseModel):
     duration_minutes: int | None = pydantic.Field(default=None, ge=1, le=1440)
     recurrence: Recurrence | None = None
     remind_minutes: int | None = pydantic.Field(default=None, ge=0, le=10080)
+    priority: Priority | None = None
+    recurrence_until: datetime.date | None = None
 
     @pydantic.model_validator(mode='after')
     def validate_create(self) -> 'EntryCreate':

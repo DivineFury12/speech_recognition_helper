@@ -2,6 +2,7 @@ import type {
   AssistantTurn,
   DailySummary,
   Entry,
+  EntryCreate,
   EntryList,
   EntryUpdate,
   ErrorResponse,
@@ -100,6 +101,10 @@ export function listEntries(query: ListEntriesQuery): Promise<EntryList> {
 
 export function listUndatedEntries(): Promise<EntryList> {
   return request('/v1/entries/undated')
+}
+
+export function createEntry(body: EntryCreate): Promise<Entry> {
+  return request('/v1/entries', json('POST', body))
 }
 
 export function updateEntry(id: string, changes: EntryUpdate): Promise<Entry> {

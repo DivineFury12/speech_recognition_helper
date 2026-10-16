@@ -56,6 +56,7 @@ class AssistantCommand(pydantic.BaseModel):
     shift_minutes: int | None = None
     remind_minutes: int | None = None
     recurrence_until: datetime.date | None = None
+    priority: str | None = None
 
     @pydantic.field_validator('title', 'query', 'date_phrase', 'time_phrase',
                              'duration_phrase', 'target_query', 'target_date_phrase',
@@ -99,7 +100,7 @@ class AssistantCommand(pydantic.BaseModel):
         for name in ('candidate_ids', 'selected_entry_id', 'move_intent',
                      'pending_step', 'signals_verified', 'recurrence', 'confirm',
                      'confirm_entry_id', 'forced', 'shift_minutes', 'remind_minutes',
-                     'recurrence_until'):
+                     'recurrence_until', 'priority'):
             schema['properties'].pop(name)
         schema['required'] = list(schema['properties'])
         return schema

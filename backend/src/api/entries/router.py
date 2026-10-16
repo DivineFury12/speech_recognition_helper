@@ -41,6 +41,7 @@ def create_entry(body: EntryCreate, request: fastapi.Request) -> Entry:
         return get_entries_service(request).create(
             kind=body.kind, title=' '.join(body.title.split()), date=body.date, time=body.time,
             timezone=body.timezone, duration_minutes=body.duration_minutes, recurrence=body.recurrence,
+            remind_minutes=body.remind_minutes, priority=body.priority, recurrence_until=body.recurrence_until,
         )
     except ValueError as exc:
         raise fastapi.HTTPException(status_code=422, detail=str(exc)) from exc

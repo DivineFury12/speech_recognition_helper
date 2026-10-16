@@ -18,7 +18,8 @@ from src.services.command_interpreter import CommandInterpreter
 from src.services.dialogue_interpreter import DialogueInterpreter
 from src.services.entries import EntryService
 from src.services.guards import (CHOICE_WORDS, DONE_RE, HELP_SUGGESTIONS, HELP_TEXT, PAST_WORDS_RE,
-                                 ONLY_THIS_RE, REMIND_FOR_RE, STOP_SERIES_RE, UNDO_RE, UNDO_TEXT, find_lead,
+                                 CLEAR_PRIORITY_RE, IMPORTANT_RE, MARK_PRIORITY_RE, ONLY_THIS_RE,
+                                 REMIND_FOR_RE, STOP_SERIES_RE, UNDO_RE, UNDO_TEXT, find_lead,
                                  find_shift, find_until, is_short_unclear, restore_numbers,
                                  yes_no)
 from src.services.recurrence import find_recurrence, first_date, next_occurrence
@@ -488,6 +489,19 @@ class AssistantService:
                               f'Готово: «{updated.title}» больше не повторяется после '
                               f'{phrasing.format_day(today, today)}.',
                               AssistantStatus.completed, [updated], undo=self._undo('update', entry))
+        mark = MARK_PRIORITY_RE.match(text) or CLEAR_PRIORITY_RE.match(text)
+        if mark:
+            entry = self._find_one(mark.group('what'), state)
+            command = AssistantCommand(action=AssistantIntent.update_entry)
+            if entry is None:
+                return self._turn(conversation_id, text, command,
+                                  f'Не нашёл запись «{mark.group("what")}».', AssistantStatus.no_action, [])
+            level = mark.groupdict().get('level') or ''
+            high = bool(level) and not re.match(r'(?i)(?:обычн|неважн|не\s)', level)
+            updated = self._entries.update(entry.id, EntryUpdate(priority='high' if high else 'normal'))
+            return self._turn(conversation_id, text, command,
+                              f'Готово: «{updated.title}» — ' + ('важное.' if high else 'обычный приоритет.'),
+                              AssistantStatus.completed, [updated], undo=self._undo('update', entry))
         lead_for = REMIND_FOR_RE.match(text)
         bare_lead = re.fullmatch(r'\s*(?:и\s+)?напомни\w*(?:\s+мне)?(?:\s+об\s+этом)?\s+за\s+[^,]+?\s*[.!]*', text,
                                  re.IGNORECASE)
@@ -655,7 +669,8 @@ class AssistantService:
                                   f'В это время уже есть {phrasing.describe(clash, today)}. '
                                   'Всё равно поставить? Или назовите другое время.',
                                   AssistantStatus.needs_clarification, [clash], pending)
-        extra = {name: getattr(command, name) for name in ('recurrence', 'remind_minutes', 'recurrence_until')
+        extra = {name: getattr(command, name) for name in ('recurrence', 'remind_minutes', 'recurrence_until',
+                                                            'priority')
                  if getattr(command, name) is not None}
         entry, created = self._entries.create_once(
             kind=command.kind, title=title, date=command.date,
@@ -671,6 +686,8 @@ class AssistantService:
             answer = answer[:-1] + f', до {phrasing.format_day(entry.recurrence_until, today)}.'
         if entry.remind_minutes:
             answer = answer[:-1] + f'. Напомню {phrasing.lead(entry.remind_minutes)}.'
+        if getattr(entry.priority, 'value', entry.priority) == 'high':
+            answer = answer[:-1] + '. Отметил как важное.'
         if entry.kind == EntryKind.meeting and command.duration_minutes is None and entry.time:
             answer = answer[:-1] + ' (длительность по умолчанию — час).'
         return self._turn(conversation_id, text, command, answer, AssistantStatus.completed, [entry],
@@ -842,6 +859,11 @@ class AssistantService:
             lead = find_lead(text)
             if lead is not None:
                 grounded['remind_minutes'] = lead
+            if IMPORTANT_RE.search(text):
+                grounded['priority'] = 'high'
+                if command.title and IMPORTANT_RE.search(command.title):
+                    cleaned = ' '.join(IMPORTANT_RE.sub(' ', command.title).split())
+                    grounded['title'] = cleaned or command.title
             if command.date is None and PAST_WORDS_RE.search(text):
                 past = parse_target_date(text, today)
                 if past is not None and past < today:

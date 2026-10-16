@@ -193,3 +193,13 @@ def find_until(text: str, today) -> object | None:
     if when.startswith('конца года'):
         return today.replace(month=12, day=31)
     return parse_date(when, today)
+
+
+IMPORTANT_RE = re.compile(r'\b(?:важн\w*|срочн\w*|приоритетн\w*)\b', re.IGNORECASE)
+MARK_PRIORITY_RE = re.compile(
+    r'^\s*(?:сделай|пометь|отметь|поставь)\s+(?P<what>.+?)\s+(?:как\s+)?'
+    r'(?P<level>важн\w*|срочн\w*|приоритетн\w*|обычн\w*|неважн\w*|не\s+важн\w*)\s*[.!]*$',
+    re.IGNORECASE,
+)
+CLEAR_PRIORITY_RE = re.compile(r'^\s*сними\s+(?:важность|приоритет|срочность)\s+(?:с|со)\s+(?P<what>.+?)\s*[.!]*$',
+                               re.IGNORECASE)

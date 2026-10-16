@@ -6,13 +6,16 @@ import { useSessionStore } from '@/stores/session'
 import { MAX_RECORD_SECONDS, useRecorder } from '@/composables/useRecorder'
 import { stopSpeech } from '@/composables/useSpeech'
 import { useBargeIn } from '@/composables/useBargeIn'
-import EntryItem from './EntryItem.vue'
+import EntryCard from './EntryCard.vue'
+import { useEditor } from '@/composables/useEditor'
 
 const chat = useChatStore()
 const { messages, sending, awaiting, retryLast } = storeToRefs(chat)
 const { voiceEnabled } = storeToRefs(useSessionStore())
 
 const draft = ref('')
+const editor = useEditor()
+const EXAMPLES = ['Что у меня сегодня?', 'Напомни завтра в 10:00 позвонить Ивану', 'Поставь встречу с командой в пятницу в 15:00']
 const listEl = ref<HTMLElement | null>(null)
 const inputEl = ref<HTMLTextAreaElement | null>(null)
 
@@ -100,9 +103,17 @@ watch(
 <template>
   <section class="panel chat" aria-label="Чат с ассистентом">
     <div ref="listEl" class="messages" aria-live="polite">
-      <p v-if="!messages.length" class="empty">
-        Скажите или напишите, например: «Напомни мне завтра в 10 утра позвонить Ивану» или «Что у меня сегодня?»
-      </p>
+      <div v-if="!messages.length" class="welcome">
+        <div class="welcome-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" width="28" height="28"><path fill="currentColor" d="M12 14a3 3 0 0 0 3-3V5a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3Zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.92V21h2v-3.08A7 7 0 0 0 19 11h-2Z" /></svg>
+        </div>
+        <h2>Чем помочь?</h2>
+        <p>Скажите или напишите обычными словами — я поставлю задачу, встречу или напоминание.</p>
+        <div class="suggestions center">
+          <button v-for="e in EXAMPLES" :key="e" type="button" class="chip" @click="pick(e)">{{ e }}</button>
+        </div>
+      </div>
+      <TransitionGroup name="msg">
       <div v-for="m in messages" :key="m.id" class="msg" :class="[m.role, { pending: m.pending }]">
         <div class="bubble">
           <span v-if="m.voice" class="voice-mark">
@@ -112,10 +123,18 @@ watch(
           <p class="text">{{ m.text }}</p>
           <span v-if="m.status === 'needs_clarification'" class="tag">ждёт ответа</span>
           <ul v-if="m.entries?.length" class="entries-inline">
-            <EntryItem v-for="e in m.entries" :key="`${e.id}:${e.date ?? ''}`" :entry="e" compact />
+            <EntryCard
+              v-for="e in m.entries"
+              :key="`${e.id}:${e.date ?? ''}`"
+              :entry="e"
+              compact
+              show-date
+              @open="editor.edit"
+            />
           </ul>
         </div>
       </div>
+      </TransitionGroup>
       <div v-if="suggestions.length" class="suggestions" aria-label="Быстрые ответы">
         <button v-for="s in suggestions" :key="s" type="button" class="chip" @click="pick(s)">{{ s }}</button>
       </div>
@@ -141,6 +160,7 @@ watch(
       <div class="field-pill" :class="{ recording: isRecording }">
         <template v-if="isRecording">
           <span class="rec-dot" aria-hidden="true" />
+          <span class="wave" aria-hidden="true"><i /><i /><i /><i /><i /><i /><i /></span>
           <span class="rec-timer">{{ timer }}</span>
           <span class="rec-limit">из 0:{{ MAX_RECORD_SECONDS }}</span>
           <button type="button" class="rec-cancel" @click="recorder.cancel()">Отмена</button>

@@ -76,6 +76,8 @@ def entry_line(entry: Entry, today: datetime.date, *, show_date: bool) -> str:
     head = ' '.join(parts)
     done = ' ✓' if entry.status is not None and entry.status.value == 'completed' else ''
     repeat = f', {LABEL[entry.recurrence]}' if entry.recurrence else ''
+    if getattr(entry.priority, 'value', entry.priority) == 'high':
+        repeat += ', важно'
     body = f'{entry.title} ({KIND_NOM[entry.kind]}{repeat}){done}'
     return f'• {head} — {body}' if head else f'• {body}'
 

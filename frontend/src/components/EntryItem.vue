@@ -31,6 +31,8 @@ const when = computed(() => {
     parts.push(`${e.time}–${endTime}${end >= 1440 ? ' (+1 день)' : ''}`)
   } else if (e.time) parts.push(e.time)
   if (e.duration_minutes) parts.push(`${e.duration_minutes} мин`)
+  if (e.remind_minutes) parts.push(`напомню за ${e.remind_minutes >= 60 && e.remind_minutes % 60 === 0 ? `${e.remind_minutes / 60} ч` : `${e.remind_minutes} мин`}`)
+  if (e.recurrence_until) parts.push(`до ${formatDate(e.recurrence_until)}`)
   return parts.join(' · ') || 'без срока'
 })
 

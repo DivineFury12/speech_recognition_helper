@@ -78,3 +78,16 @@ def entry_line(entry: Entry, today: datetime.date, *, show_date: bool) -> str:
     repeat = f', {LABEL[entry.recurrence]}' if entry.recurrence else ''
     body = f'{entry.title} ({KIND_NOM[entry.kind]}{repeat}){done}'
     return f'• {head} — {body}' if head else f'• {body}'
+
+
+def lead(minutes: int) -> str:
+    """15 → «за 15 минут», 60 → «за час», 1440 → «за день»."""
+    if minutes == 0:
+        return 'в момент начала'
+    if minutes % 1440 == 0:
+        days = minutes // 1440
+        return 'за день' if days == 1 else f'за {days} {plural(days, "день", "дня", "дней")}'
+    if minutes % 60 == 0:
+        hours = minutes // 60
+        return 'за час' if hours == 1 else f'за {hours} {plural(hours, "час", "часа", "часов")}'
+    return f'за {minutes} {plural(minutes, "минуту", "минуты", "минут")}'

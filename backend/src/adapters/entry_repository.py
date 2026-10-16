@@ -52,6 +52,8 @@ class SqlAlchemyEntryRepository:
                 date=entry.date, time=entry.time, timezone=entry.timezone,
                 duration_minutes=entry.duration_minutes,
                 recurrence=entry.recurrence.value if entry.recurrence else None,
+                recurrence_until=entry.recurrence_until, remind_minutes=entry.remind_minutes,
+                exdates=[d.isoformat() for d in entry.exdates] if entry.exdates else None,
                 status=(entry.status or EntryStatus.pending).value, created_at=entry.created_at,
                 updated_at=datetime.datetime.now(datetime.timezone.utc),
             )
@@ -101,6 +103,8 @@ class SqlAlchemyEntryRepository:
                     raise ValueError('Такая запись уже есть')
             title_changed = 'title' in changes and changes['title'] != row.title
             for name, value in changes.items():
+                if name == 'exdates' and value is not None:
+                    value = sorted({d.isoformat() if isinstance(d, datetime.date) else d for d in value})
                 setattr(row, name, value.value if isinstance(value, (EntryStatus, Recurrence)) else value)
             if title_changed:
                 session.query(EntryEmbeddingRow).filter(
@@ -135,12 +139,15 @@ class SqlAlchemyEntryRepository:
         embedding_model: str | None,
         duration_minutes: int | None = None,
         recurrence: Recurrence | None = None,
+        remind_minutes: int | None = None,
+        recurrence_until: datetime.date | None = None,
     ) -> Entry:
         with database_session(self._sessions, write=True) as session:
             return self._insert(
                 session, kind=kind, title=title, date=date, time=time,
                 timezone=timezone, embedding=embedding, embedding_model=embedding_model,
                 duration_minutes=duration_minutes, recurrence=recurrence,
+                remind_minutes=remind_minutes, recurrence_until=recurrence_until,
             )
 
     @staticmethod
@@ -149,11 +156,13 @@ class SqlAlchemyEntryRepository:
         date: datetime.date | None, time: str | None, timezone: str,
         embedding: list[float] | None, embedding_model: str | None,
         duration_minutes: int | None = None, recurrence: Recurrence | None = None,
+        remind_minutes: int | None = None, recurrence_until: datetime.date | None = None,
     ) -> Entry:
         row = EntryRow(
             id=uuid.uuid4(), user_id=current_user(), kind=kind.value, title=title, date=date,
             time=time, timezone=timezone, duration_minutes=duration_minutes,
             recurrence=recurrence.value if recurrence else None,
+            remind_minutes=remind_minutes, recurrence_until=recurrence_until,
             status=EntryStatus.pending.value,
         )
         session.add(row)
@@ -171,7 +180,8 @@ class SqlAlchemyEntryRepository:
         self, *, kind: EntryKind, title: str, date: datetime.date | None,
         time: str | None, timezone: str, embedding: list[float] | None,
         embedding_model: str | None, duration_minutes: int | None = None,
-        recurrence: Recurrence | None = None,
+        recurrence: Recurrence | None = None, remind_minutes: int | None = None,
+        recurrence_until: datetime.date | None = None,
     ) -> tuple[Entry, bool]:
         normalized_title = ' '.join(title.casefold().split())
         user_id = current_user()
@@ -201,6 +211,7 @@ class SqlAlchemyEntryRepository:
                 session, kind=kind, title=title, date=date, time=time,
                 timezone=timezone, embedding=embedding, embedding_model=embedding_model,
                 duration_minutes=duration_minutes, recurrence=recurrence,
+                remind_minutes=remind_minutes, recurrence_until=recurrence_until,
             ), True
 
     def list_period(
@@ -224,7 +235,11 @@ class SqlAlchemyEntryRepository:
             rows = [_to_entry(row) for row in session.scalars(statement)]
         result = []
         for entry in rows:
-            for day in occurrences(entry.date, entry.recurrence, date_from, date_to):
+            last = min(date_to, entry.recurrence_until) if entry.recurrence_until else date_to
+            skipped = set(entry.exdates or [])
+            for day in occurrences(entry.date, entry.recurrence, date_from, last):
+                if day in skipped:
+                    continue
                 result.append(entry if day == entry.date else entry.model_copy(update={'date': day}))
         result.sort(key=lambda e: (e.date, e.time is None, e.time or '', e.created_at))
         return result

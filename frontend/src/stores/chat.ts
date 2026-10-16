@@ -153,6 +153,7 @@ export const useChatStore = defineStore('chat', () => {
         status: 'completed',
         entries: summary.entries,
       })
+      window.setTimeout(() => speak(summary.assistant_text), 1500)
       try {
         localStorage.setItem(SUMMARY_KEY, day)
       } catch {}

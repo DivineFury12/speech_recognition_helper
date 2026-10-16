@@ -184,13 +184,14 @@ class EntryService:
     def create(
         self, *, kind: EntryKind, title: str, date: datetime.date | None,
         time: str | None, timezone: str, duration_minutes: int | None = None,
-        recurrence: Recurrence | None = None,
+        recurrence: Recurrence | None = None, **extra,
     ) -> Entry:
         duration_minutes = self._duration_for_create(kind, duration_minutes)
         if recurrence is not None and date is None:
             raise ValueError('Для повторяющейся записи нужна дата')
         embedding = self._embedding(title)
         kwargs = {'recurrence': recurrence} if recurrence is not None else {}
+        kwargs.update({k: v for k, v in extra.items() if v is not None})
         return self._repository.create(
             kind=kind, title=title, date=date, time=time, timezone=timezone,
             embedding=embedding, duration_minutes=duration_minutes,
@@ -201,13 +202,14 @@ class EntryService:
     def create_once(
         self, *, kind: EntryKind, title: str, date: datetime.date | None,
         time: str | None, timezone: str, duration_minutes: int | None = None,
-        recurrence: Recurrence | None = None,
+        recurrence: Recurrence | None = None, **extra,
     ) -> tuple[Entry, bool]:
         """Return the matching pending entry when the same command is repeated."""
         title = ' '.join(title.split())
         duration_minutes = self._duration_for_create(kind, duration_minutes)
         embedding = self._embedding(title)
         kwargs = {'recurrence': recurrence} if recurrence is not None else {}
+        kwargs.update({k: v for k, v in extra.items() if v is not None})
         return self._repository.create_once(
             kind=kind, title=title, date=date, time=time, timezone=timezone,
             embedding=embedding, duration_minutes=duration_minutes,

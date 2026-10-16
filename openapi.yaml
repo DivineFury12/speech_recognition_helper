@@ -992,6 +992,23 @@ components:
           description: Длительность встречи; для остальных типов null.
         recurrence:
           $ref: '#/components/schemas/Recurrence'
+        recurrence_until:
+          type: string
+          format: date
+          nullable: true
+          description: Последний день повторяющейся серии; null — без конца.
+        exdates:
+          type: array
+          nullable: true
+          description: Даты, в которые повтор пропущен («удали только эту планёрку»).
+          items:
+            type: string
+            format: date
+        remind_minutes:
+          type: integer
+          minimum: 0
+          nullable: true
+          description: За сколько минут до начала напомнить; null — по умолчанию.
         status:
           $ref: '#/components/schemas/EntryStatus'
         created_at:
@@ -1028,6 +1045,10 @@ components:
           nullable: true
         recurrence:
           $ref: '#/components/schemas/Recurrence'
+        remind_minutes:
+          type: integer
+          minimum: 0
+          nullable: true
     EntryUpdate:
       type: object
       minProperties: 1
@@ -1051,6 +1072,23 @@ components:
           nullable: true
         recurrence:
           $ref: '#/components/schemas/Recurrence'
+        recurrence_until:
+          type: string
+          format: date
+          nullable: true
+          description: Последний день повторяющейся серии; null — без конца.
+        exdates:
+          type: array
+          nullable: true
+          description: Даты, в которые повтор пропущен («удали только эту планёрку»).
+          items:
+            type: string
+            format: date
+        remind_minutes:
+          type: integer
+          minimum: 0
+          nullable: true
+          description: За сколько минут до начала напомнить; null — по умолчанию.
         status:
           $ref: '#/components/schemas/EntryStatus'
     EntryList:

@@ -140,6 +140,7 @@ class AssistantServiceTests(unittest.TestCase):
             set(AssistantCommand.model_fields) - {
                 'candidate_ids', 'selected_entry_id', 'move_intent', 'pending_step',
                 'signals_verified', 'recurrence', 'confirm', 'confirm_entry_id', 'forced', 'shift_minutes',
+                'remind_minutes', 'recurrence_until',
             },
         )
 

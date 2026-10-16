@@ -65,12 +65,26 @@ def build_calendar(entries: list[dict[str, Any]], name: str = "Голосово�
         done = "✓ " if e.get("status") == "completed" else ""
         lines.append(f"SUMMARY:{_escape(done + KIND_PREFIX[e['kind']] + ': ' + e['title'])}")
         if e.get("recurrence") in RRULE:
-            lines.append(f"RRULE:{RRULE[e['recurrence']]}")
+            rule = RRULE[e["recurrence"]]
+            if e.get("recurrence_until"):
+                rule += f";UNTIL={date.fromisoformat(e['recurrence_until']).strftime('%Y%m%d')}T235959Z"
+            lines.append(f"RRULE:{rule}")
+            for skipped in e.get("exdates") or []:
+                day = date.fromisoformat(skipped)
+                if e.get("time"):
+                    stamp_skip = _utc({**e, "date": day.isoformat()}).strftime("%Y%m%dT%H%M%SZ")
+                    lines.append(f"EXDATE:{stamp_skip}")
+                else:
+                    lines.append(f"EXDATE;VALUE=DATE:{day.strftime('%Y%m%d')}")
         if e.get("status") == "cancelled":
             lines.append("STATUS:CANCELLED")
-        if e["kind"] == "reminder" and e.get("time"):
+        lead = e.get("remind_minutes")
+        if lead is None and e["kind"] == "reminder":
+            lead = 0
+        if lead is not None and e.get("time"):
+            trigger = "PT0M" if lead == 0 else f"-PT{lead}M"
             lines += ["BEGIN:VALARM", "ACTION:DISPLAY", f"DESCRIPTION:{_escape(e['title'])}",
-                      "TRIGGER:PT0M", "END:VALARM"]
+                      f"TRIGGER:{trigger}", "END:VALARM"]
         lines.append("END:VEVENT")
     lines.append("END:VCALENDAR")
     folded = [part for line in lines for part in _fold(line)]

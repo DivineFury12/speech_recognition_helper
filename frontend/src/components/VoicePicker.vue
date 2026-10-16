@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { BROWSER_VOICE, VOICE_OFF, useSpeech } from '@/composables/useSpeech'
+import { useBargeIn } from '@/composables/useBargeIn'
 
 const {
   voice,
@@ -17,6 +18,7 @@ const {
   stop,
 } = useSpeech()
 
+const { enabled: bargeIn } = useBargeIn()
 const open = ref(false)
 const root = ref<HTMLElement | null>(null)
 
@@ -112,6 +114,10 @@ onBeforeUnmount(() => document.removeEventListener('click', onDocumentClick))
         <span>Громкость</span>
         <input v-model.number="volume" type="range" min="0" max="1" step="0.05" aria-label="Громкость озвучки" />
         <span class="voice-volume-value">{{ Math.round(volume * 100) }}%</span>
+      </label>
+      <label class="voice-volume" title="Когда ассистент говорит, начните говорить сами — он замолчит и начнёт слушать">
+        <input v-model="bargeIn" type="checkbox" />
+        <span>Перебивать голосом</span>
       </label>
       <div class="voice-divider" />
       <div class="voice-option" :class="{ selected: voice === VOICE_OFF }" role="option" :aria-selected="voice === VOICE_OFF">

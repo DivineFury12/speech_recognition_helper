@@ -108,3 +108,88 @@ def find_shift(text: str) -> int | None:
                         7 * 1440 if unit.startswith('недел') else 1440)
     sign = -1 if direction in ('раньше', 'пораньше', 'назад') else 1
     return int(sign * minutes)
+
+
+_SCHEDULE_NUMBER = re.compile(
+    r'(?:\b(?:в|во|к|на|до|с|со|через|за|по)\s+(?:\d+\s*(?:-|и|или)\s*)?$)'
+)
+_SCHEDULE_AFTER = re.compile(
+    r'^\s*(?::\d|час|ч\b|мин|дн|день|недел|месяц|числ|утра|вечера|дня|ночи|год|'
+    r'январ|феврал|март|апрел|ма[йя]|июн|июл|август|сентябр|октябр|ноябр|декабр|[./]\d)',
+    re.IGNORECASE,
+)
+
+
+def restore_numbers(title: str | None, text: str) -> str | None:
+    """GigaChat sometimes drops numbers from a title («Встреча с Иваном 159516»); put them back.
+
+    Numbers that belong to a date, time or duration («в 15:00», «через 2 дня», «5 октября») are skipped.
+    """
+    if not title:
+        return title
+    missing = []
+    for match in re.finditer(r'(?<![\d:.,/-])\d+(?![\d:.,/-]?\d)', text):
+        before, after = text[:match.start()].casefold(), text[match.end():]
+        if _SCHEDULE_NUMBER.search(before) or _SCHEDULE_AFTER.match(after):
+            continue
+        if match.group() not in re.findall(r'\d+', title):
+            missing.append(match.group())
+    return f"{title} {' '.join(missing)}" if missing else title
+
+
+_LEAD_RE = re.compile(
+    r'\bза\s+(?P<amount>\d{1,3}|полчаса|пол|полтора|полторы|один|одну|два|две|три|пять|десять|пятнадцать|'
+    r'двадцать|тридцать|сорок)?\s*(?P<unit>минут\w*|мин\b|час\w*|ч\b|дн\w*|день|сутк\w*)?(?:\s+до\b)?',
+    re.IGNORECASE,
+)
+REMIND_FOR_RE = re.compile(
+    r'^\s*напомни\w*(?:\s+мне)?\s+за\s+.+?\s+до\s+(?P<what>.+?)\s*[.!]*$', re.IGNORECASE,
+)
+ONLY_THIS_RE = re.compile(r'\bтолько\b', re.IGNORECASE)
+STOP_SERIES_RE = re.compile(
+    r'^\s*(?:больше\s+не\s+повторя\w*|останови\s+повтор\w*|заверши\s+(?:серию|повтор\w*)|'
+    r'прекрати\s+повтор\w*|отмени\s+повтор\w*)\s+(?P<what>.+?)\s*[.!]*$', re.IGNORECASE,
+)
+UNTIL_RE = re.compile(
+    r'\bдо\s+(?P<when>конца\s+(?:недели|месяца|года)|\d{1,2}\s+[а-я]+|\d{1,2}[./]\d{1,2}(?:[./]\d{2,4})?)',
+    re.IGNORECASE,
+)
+
+
+def find_lead(text: str) -> int | None:
+    """«напомни за 15 минут» → 15, «за час до встречи» → 60, «за день» → 1440."""
+    value = text.casefold().replace('ё', 'е')
+    for match in _LEAD_RE.finditer(value):
+        amount, unit = match.group('amount'), match.group('unit')
+        if amount is None and unit is None:
+            continue
+        if amount in ('полчаса',):
+            return 30
+        if unit is None:
+            continue
+        count = 1 if amount is None else float(amount) if amount.isdigit() else _AMOUNTS.get(amount, 1)
+        if amount in ('пол',):
+            count = 0.5
+        factor = 60 if unit.startswith(('час', 'ч')) else 1 if unit.startswith('мин') else 1440
+        return int(count * factor)
+    return None
+
+
+def find_until(text: str, today) -> object | None:
+    """«каждый понедельник до конца месяца» → the last day of the series."""
+    import calendar
+    import datetime
+
+    from src.services.temporal import parse_date
+
+    match = UNTIL_RE.search(text.casefold().replace('ё', 'е'))
+    if match is None:
+        return None
+    when = match.group('when')
+    if when.startswith('конца недели'):
+        return today + datetime.timedelta(days=6 - today.weekday())
+    if when.startswith('конца месяца'):
+        return today.replace(day=calendar.monthrange(today.year, today.month)[1])
+    if when.startswith('конца года'):
+        return today.replace(month=12, day=31)
+    return parse_date(when, today)

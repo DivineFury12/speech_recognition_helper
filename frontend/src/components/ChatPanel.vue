@@ -5,6 +5,7 @@ import { useChatStore } from '@/stores/chat'
 import { useSessionStore } from '@/stores/session'
 import { MAX_RECORD_SECONDS, useRecorder } from '@/composables/useRecorder'
 import { stopSpeech } from '@/composables/useSpeech'
+import { useBargeIn } from '@/composables/useBargeIn'
 import EntryItem from './EntryItem.vue'
 
 const chat = useChatStore()
@@ -17,6 +18,10 @@ const inputEl = ref<HTMLTextAreaElement | null>(null)
 
 const recorder = useRecorder(({ blob, filename }) => chat.sendAudio(blob, filename))
 const { isRecording, elapsed, error: recError } = recorder
+const stopBargeIn = useBargeIn().onBargeIn(() => {
+  if (!isRecording.value && !sending.value && voiceEnabled.value) void recorder.start()
+})
+onBeforeUnmount(stopBargeIn)
 
 const hasText = computed(() => draft.value.trim().length > 0)
 const suggestions = computed(() => {

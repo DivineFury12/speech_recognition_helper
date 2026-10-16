@@ -584,6 +584,15 @@ export interface components {
             /** @description Длительность встречи; для остальных типов null. */
             duration_minutes?: number | null;
             recurrence?: components["schemas"]["Recurrence"];
+            /**
+             * Format: date
+             * @description Последний день повторяющейся серии; null — без конца.
+             */
+            recurrence_until?: string | null;
+            /** @description Даты, в которые повтор пропущен («удали только эту планёрку»). */
+            exdates?: string[] | null;
+            /** @description За сколько минут до начала напомнить; null — по умолчанию. */
+            remind_minutes?: number | null;
             status?: components["schemas"]["EntryStatus"];
             /**
              * Format: date-time
@@ -606,6 +615,7 @@ export interface components {
             timezone: string;
             duration_minutes?: number | null;
             recurrence?: components["schemas"]["Recurrence"];
+            remind_minutes?: number | null;
         };
         EntryUpdate: {
             title?: string;
@@ -615,6 +625,15 @@ export interface components {
             timezone?: string;
             duration_minutes?: number | null;
             recurrence?: components["schemas"]["Recurrence"];
+            /**
+             * Format: date
+             * @description Последний день повторяющейся серии; null — без конца.
+             */
+            recurrence_until?: string | null;
+            /** @description Даты, в которые повтор пропущен («удали только эту планёрку»). */
+            exdates?: string[] | null;
+            /** @description За сколько минут до начала напомнить; null — по умолчанию. */
+            remind_minutes?: number | null;
             status?: components["schemas"]["EntryStatus"];
         };
         EntryList: {

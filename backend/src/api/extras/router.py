@@ -89,7 +89,7 @@ def get_session(request: fastapi.Request) -> SessionInfo:
         user_id=session.user_id,
         access_code_required=bool(sessions.access_code),
         unlocked=session.unlocked or not sessions.access_code,
-        llm_provider='gigachat' if state.assistant_service is not None else 'none',
+        llm_provider='gigachat' if state.llm_health is not None else 'rules',
         asr_enabled=state.voice_enabled and state.transcription_service is not None,
         voice_enabled=state.voice_enabled,
     )
@@ -117,13 +117,13 @@ def unlock_session(body: UnlockRequest, request: fastapi.Request) -> fastapi.Res
 def services_status(request: fastapi.Request) -> ServicesStatus:
     state = request.app.state
     items = []
-    if state.assistant_service is None:
-        items.append(('Понимание команд', 'off', 'GigaChat не подключён: задайте GIGACHAT_AUTH_KEY'))
+    health = getattr(state, 'llm_health', None)
+    if health is None:
+        items.append(('Понимание команд', 'off', 'ключ GigaChat не задан, работают правила'))
+    elif health.healthy:
+        items.append(('Понимание команд', 'ok', 'GigaChat отвечает'))
     else:
-        health = getattr(state, 'llm_health', None)
-        healthy = health is None or health.healthy
-        items.append(('Понимание команд', 'ok' if healthy else 'error',
-                      'GigaChat отвечает' if healthy else 'GigaChat не отвечает — проверьте ключ'))
+        items.append(('Понимание команд', 'error', 'GigaChat не отвечает, работают правила — проверьте ключ'))
     items.append(('База данных', 'ok' if state.entries_service is not None else 'error',
                   'PostgreSQL подключён' if state.entries_service is not None else 'PostgreSQL не подключён'))
     if not state.voice_enabled:

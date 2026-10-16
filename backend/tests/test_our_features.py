@@ -23,24 +23,23 @@ TZ = 'Europe/Moscow'
 
 class RecurringRepository(FakeRepository):
     def create(self, *, kind, title, date, time, timezone, embedding, embedding_model,
-               duration_minutes=None, recurrence=None):
+               duration_minutes=None, recurrence=None, **extra):
         entry = super().create(kind=kind, title=title, date=date, time=time, timezone=timezone,
                                embedding=embedding, embedding_model=embedding_model,
                                duration_minutes=duration_minutes)
-        if recurrence is not None:
-            entry = entry.model_copy(update={'recurrence': recurrence})
-            self.items[-1] = entry
+        entry = entry.model_copy(update={'recurrence': recurrence, **extra})
+        self.items[-1] = entry
         return entry
 
     def create_once(self, *, kind, title, date, time, timezone, embedding, embedding_model,
-                    duration_minutes=None, recurrence=None):
+                    duration_minutes=None, recurrence=None, **extra):
         for entry in self.items:
             if (entry.kind == kind and entry.title.casefold() == title.casefold() and entry.date == date
                     and entry.time == time and entry.status == EntryStatus.pending):
                 return entry, False
         return self.create(kind=kind, title=title, date=date, time=time, timezone=timezone,
                            embedding=embedding, embedding_model=embedding_model,
-                           duration_minutes=duration_minutes, recurrence=recurrence), True
+                           duration_minutes=duration_minutes, recurrence=recurrence, **extra), True
 
     def restore(self, entry):
         self.items.append(entry)
@@ -51,8 +50,10 @@ class RecurringRepository(FakeRepository):
         for entry in self.items:
             if entry.date is None or (kind is not None and entry.kind != kind):
                 continue
-            for day in occurrences(entry.date, entry.recurrence, date_from, date_to):
-                result.append(entry.model_copy(update={'date': day}))
+            last = min(date_to, entry.recurrence_until) if entry.recurrence_until else date_to
+            for day in occurrences(entry.date, entry.recurrence, date_from, last):
+                if day not in set(entry.exdates or []):
+                    result.append(entry.model_copy(update={'date': day}))
         return result
 
 
@@ -304,3 +305,69 @@ class UnsureClassifierTests(unittest.TestCase):
         self.assertEqual(done.status, AssistantStatus.completed)
         self.assertIsNotNone(repository.get(first.id))
         self.assertIsNone(repository.get(second.id))
+
+
+class NewFeatureTests(unittest.TestCase):
+    def test_title_keeps_numbers_dropped_by_model(self):
+        chat = Chat([command(action='create_entry', kind='task', title='встреча с тестовым Иваном')])
+        turn = chat('Создай задачу встреча с тестовым Иваном 159516')
+        self.assertEqual(turn.entries[0].title, 'Встреча с тестовым Иваном 159516')
+
+    def test_two_commands_in_one_phrase_and_lead_time(self):
+        tomorrow = (TODAY + datetime.timedelta(days=1)).isoformat()
+        chat = Chat([command(action='create_entry', kind='meeting', title='встреча с Иваном', date=tomorrow,
+                             time='10:00', date_phrase='завтра', time_phrase='в 10:00')])
+        turn = chat('Поставь встречу с Иваном завтра в 10:00 и напомни за час')
+        self.assertEqual(turn.status, AssistantStatus.completed)
+        self.assertIn('напомню за час', turn.assistant_text)
+        self.assertEqual(chat.repository.items[0].remind_minutes, 60)
+
+    def test_lead_time_in_create_and_for_existing_entry(self):
+        tomorrow = TODAY + datetime.timedelta(days=1)
+        chat = Chat([command(action='create_entry', kind='meeting', title='созвон', date=tomorrow.isoformat(),
+                             time='10:00', date_phrase='завтра', time_phrase='в 10:00')])
+        created = chat('Поставь созвон завтра в 10:00, напомни за 15 минут')
+        self.assertEqual(created.entries[0].remind_minutes, 15)
+        other = chat.entries.create(kind=EntryKind.meeting, title='Встреча с Петром', date=tomorrow, time='15:00',
+                                    timezone=TZ)
+        turn = chat('Напомни за полчаса до встречи с Петром')
+        self.assertEqual(chat.repository.get(other.id).remind_minutes, 30)
+        self.assertIn('за 30 минут', turn.assistant_text)
+
+    def test_series_until_only_this_and_stop(self):
+        monday = TODAY + datetime.timedelta(days=(7 - TODAY.weekday()) % 7 or 7)
+        chat = Chat([
+            command(action='create_entry', kind='meeting', title='планёрка', date=monday.isoformat(), time='10:00',
+                    date_phrase='каждый понедельник', time_phrase='в 10:00'),
+            command(action='delete_entry', target_query='планёрка'),
+            command(action='update_entry', target_query='планёрка', time='12:00', time_phrase='на 12:00'),
+        ])
+        created = chat('Планёрка каждый понедельник в 10:00 до конца года')
+        self.assertEqual(created.entries[0].recurrence_until, datetime.date(TODAY.year, 12, 31))
+        asked = chat('Удали только ближайшую планёрку')
+        self.assertIn('Остальные повторы останутся', asked.assistant_text)
+        chat('да')
+        days = [e.date for e in chat.entries.list_period(TODAY, TODAY + datetime.timedelta(days=20))]
+        self.assertNotIn(monday, days)
+        self.assertIn(monday + datetime.timedelta(days=7), days)
+        moved = chat('Перенеси только эту планёрку на 12:00')
+        self.assertIn('только этот раз', moved.assistant_text)
+        self.assertEqual(moved.entries[0].time, '12:00')
+        self.assertIsNone(moved.entries[0].recurrence)
+        stopped = chat('Больше не повторяй планёрку')
+        self.assertIn('больше не повторяется', stopped.assistant_text)
+
+
+class OnlyThisSurvivesClarification(unittest.TestCase):
+    def test_semantic_confirmation_keeps_only_this(self):
+        monday = TODAY + datetime.timedelta(days=(7 - TODAY.weekday()) % 7 or 7)
+        chat = Chat([command(action='delete_entry', target_query='ближайшую планёрку')] * 3)
+        series = chat.entries.create(kind=EntryKind.meeting, title='Планёрка', date=monday, time='10:00',
+                                     timezone=TZ, recurrence=Recurrence.weekly)
+        first = chat('Удали только ближайшую планёрку')
+        while first.status == AssistantStatus.needs_clarification:
+            first = chat('да')
+        self.assertIsNotNone(chat.repository.get(series.id))
+        days = [e.date for e in chat.entries.list_period(TODAY, TODAY + datetime.timedelta(days=20))]
+        self.assertNotIn(monday, days)
+        self.assertIn(monday + datetime.timedelta(days=7), days)

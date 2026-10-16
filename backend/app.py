@@ -10,6 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 import src.adapters.transcriber
 import src.adapters.ffmeg
 import src.adapters.gigachat
+import src.adapters.rules_model
 import src.adapters.local_embeddings
 import src.adapters.entry_repository
 import src.adapters.conversation_repository
@@ -117,6 +118,10 @@ def create_app(settings: src.settings.Settings | None = None) -> fastapi.FastAPI
                 ca_bundle=config.gigachat_ca_bundle,
             ))
             app.state.llm_health = gigachat_client
+            gigachat_client = src.adapters.rules_model.FallbackModel(gigachat_client)
+        else:
+            logger.warning('Ключ GigaChat не задан: команды разбираются правилами')
+            gigachat_client = src.adapters.rules_model.RulesModel()
 
         if config.database_url is not None:
             sessions, engine = src.db.create_session_factory(config.database_url)

@@ -50,6 +50,9 @@ class Entry(pydantic.BaseModel):
     timezone: str
     duration_minutes: int | None = None
     recurrence: Recurrence | None = None
+    recurrence_until: datetime.date | None = None
+    exdates: list[datetime.date] | None = None
+    remind_minutes: int | None = None
     status: EntryStatus | None = None
     created_at: datetime.datetime
     updated_at: datetime.datetime | None = None
@@ -68,6 +71,9 @@ class EntryUpdate(pydantic.BaseModel):
     timezone: str | None = pydantic.Field(default=None, min_length=1)
     duration_minutes: int | None = pydantic.Field(default=None, ge=1, le=1440)
     recurrence: Recurrence | None = None
+    recurrence_until: datetime.date | None = None
+    exdates: list[datetime.date] | None = None
+    remind_minutes: int | None = pydantic.Field(default=None, ge=0, le=10080)
     status: EntryStatus | None = None
 
     @pydantic.model_validator(mode='after')
@@ -93,6 +99,7 @@ class EntryCreate(pydantic.BaseModel):
     timezone: str = pydantic.Field(min_length=1, max_length=64)
     duration_minutes: int | None = pydantic.Field(default=None, ge=1, le=1440)
     recurrence: Recurrence | None = None
+    remind_minutes: int | None = pydantic.Field(default=None, ge=0, le=10080)
 
     @pydantic.model_validator(mode='after')
     def validate_create(self) -> 'EntryCreate':

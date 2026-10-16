@@ -13,6 +13,7 @@ import { useChatStore } from './stores/chat'
 import { useEntriesStore } from './stores/entries'
 import { useSessionStore } from './stores/session'
 import { useSpeech } from './composables/useSpeech'
+import { useReminders } from './composables/useReminders'
 import { timezone } from './utils/time'
 
 const mocks = import.meta.env.VITE_USE_MOCKS === 'true'
@@ -66,8 +67,18 @@ function onDocumentClick(e: MouseEvent) {
   if (statusOpen.value && statusEl.value && !statusEl.value.contains(e.target as Node)) statusOpen.value = false
 }
 
+const reminders = useReminders()
+watch(reminders.lastShown, (text) => {
+  if (text) notify(text)
+})
+
+async function toggleReminders() {
+  notify(await reminders.toggle())
+}
+
 watch([loaded, unlocked], ([isLoaded, isUnlocked]) => {
   if (isLoaded && isUnlocked) {
+    reminders.startTimer()
     void chat.showDailySummary()
     void checkHealth()
   }
@@ -105,6 +116,20 @@ onBeforeUnmount(() => {
       <div class="meta">
         <span v-if="mocks" class="badge">моки</span>
         <VoicePicker v-if="voiceEnabled" />
+        <button
+          v-if="unlocked && loaded && reminders.supported"
+          type="button"
+          class="icon-action"
+          :class="{ active: reminders.enabled.value }"
+          :title="reminders.enabled.value ? 'Уведомления о напоминаниях включены' : 'Включить уведомления о напоминаниях'"
+          :aria-pressed="reminders.enabled.value"
+          aria-label="Уведомления о напоминаниях"
+          @click="toggleReminders"
+        >
+          <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+            <path fill="currentColor" d="M12 22a2 2 0 0 0 2-2h-4a2 2 0 0 0 2 2Zm6-6V11a6 6 0 0 0-5-5.91V4a1 1 0 0 0-2 0v1.09A6 6 0 0 0 6 11v5l-2 2v1h16v-1l-2-2Z" />
+          </svg>
+        </button>
         <CalendarMenu v-if="unlocked && loaded" @notify="notify" />
         <div ref="statusEl" class="status-wrap">
           <button

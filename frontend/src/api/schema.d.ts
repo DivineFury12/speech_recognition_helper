@@ -4,6 +4,157 @@
  */
 
 export interface paths {
+    "/v1/session": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Узнать текущую сессию и нужен ли код доступа */
+        get: operations["getSession"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/session/unlock": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Ввести код доступа (если на сервере задан ACCESS_CODE) */
+        post: operations["unlockSession"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/entries/undated": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Получить задачи без срока */
+        get: operations["listUndatedEntries"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/calendar": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Получить ссылку на календарь в формате iCalendar
+         * @description Ссылку можно добавить в Google, Apple или Outlook Calendar как подписку.
+         */
+        get: operations["getCalendarLink"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/calendar/feed/{token}.ics": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Календарь пользователя (iCalendar)
+         * @description Доступ по токену из ссылки, кука не нужна.
+         */
+        get: operations["getCalendarFeed"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/calendar/rotate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Выпустить новую ссылку на календарь
+         * @description Старая ссылка перестаёт работать. Нужна, если ссылка попала не в те руки.
+         */
+        post: operations["rotateCalendarLink"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/assistant/summary": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Сводка на сегодня
+         * @description Записи на сегодня и число невыполненных с прошлых дней.
+         */
+        get: operations["getDailySummary"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/status": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Состояние сервисов
+         * @description Что сейчас работает — понимание команд (GigaChat), распознавание, озвучка, Google Календарь.
+         */
+        get: operations["getServicesStatus"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/health": {
         parameters: {
             query?: never;
@@ -73,14 +224,9 @@ export interface paths {
         /**
          * Отправить текстовый запрос ассистенту
          * @description Основной маршрут текстовой кнопки. Ассистент определяет намерение,
-         *     через GigaChat извлекает структурированную команду и возвращает ответ.
-         *     При подключённой БД создание, список, поиск, изменение и удаление
-         *     возвращают status = completed.
-         *     При нехватке данных ответ имеет status = needs_clarification. Следующий
-         *     ответ пользователя отправляется с тем же conversation_id; история и
-         *     незавершённая команда сохраняются на сервере. При неоднозначном выборе
-         *     записи ответ содержит варианты в entries; следующий ответ может быть
-         *     «вторую» или «ту, что в 16:00».
+         *     при необходимости сохраняет или ищет записи и возвращает ответ.
+         *     Если не хватает данных, status = needs_clarification; следующий ответ
+         *     пользователя отправляется с тем же conversation_id.
          */
         post: operations["sendTextMessage"];
         delete?: never;
@@ -195,6 +341,27 @@ export interface paths {
         patch: operations["updateEntry"];
         trace?: never;
     };
+    "/v1/speech/voices": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Голоса для озвучки ответов
+         * @description Голоса Silero TTS (русская модель, работает на процессоре).
+         *     Пока модель загружается после старта сервера, loading = true.
+         */
+        get: operations["listVoices"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/speech/synthesize": {
         parameters: {
             query?: never;
@@ -204,7 +371,11 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Озвучить текст ответа ассистента */
+        /**
+         * Озвучить текст ответа ассистента выбранным голосом
+         * @description Даты, время и числа перед синтезом переводятся в слова. Ответ — WAV 24 кГц.
+         *     Если озвучка отключена или ещё загружается — 503, фронтенд читает ответ голосом браузера.
+         */
         post: operations["synthesizeSpeech"];
         delete?: never;
         options?: never;
@@ -216,47 +387,6 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
-        /**
-         * @description Внутренний структурированный ответ внешней модели. Backend проверяет его
-         *     перед сохранением или поиском; фронтенд этот объект не отправляет.
-         *     Для create_entry нужны kind и title; date и time обязательны для встречи
-         *     и напоминания. Для list_entries нужны date_from/date_to, для
-         *     search_entries — query. Для complete_entry, update_entry и delete_entry
-         *     используются target_query и необязательные target_date/target_time.
-         *     При update_entry новые значения передаются в new_title/date/time/duration_minutes.
-         *     date_phrase и time_phrase должны содержать
-         *     точные фразы пользователя, подтверждающие дату и время. duration_phrase
-         *     содержит слова о длительности встречи; без них сервер применяет 60 минут
-         *     при создании и сохраняет прежнюю длительность при переносе. Отсутствующие
-         *     данные модель возвращает как null; обязательность для выполнения
-         *     конкретного действия проверяет сервер.
-         */
-        AssistantCommand: {
-            /** @enum {string} */
-            action: "create_entry" | "list_entries" | "search_entries" | "complete_entry" | "update_entry" | "delete_entry" | "unknown";
-            /** @enum {string|null} */
-            kind: "task" | "reminder" | "meeting" | null;
-            title: string | null;
-            /** Format: date */
-            date: string | null;
-            date_phrase: string | null;
-            time: string | null;
-            time_phrase: string | null;
-            duration_minutes: number | null;
-            duration_phrase: string | null;
-            /** Format: date */
-            date_from: string | null;
-            /** Format: date */
-            date_to: string | null;
-            query: string | null;
-            target_query: string | null;
-            /** Format: date */
-            target_date: string | null;
-            target_date_phrase: string | null;
-            target_time: string | null;
-            target_time_phrase: string | null;
-            new_title: string | null;
-        };
         ErrorResponse: {
             detail: string;
         };
@@ -311,9 +441,9 @@ export interface components {
          * @example {
          *       "conversation_id": "550e8400-e29b-41d4-a716-446655440000",
          *       "turn_id": "4e8d4cb6-bf66-453c-a92b-71c578889103",
-         *       "user_text": "Поставь встречу с Иваном завтра в 15:00",
-         *       "assistant_text": "Сохранено: Встреча с Иваном.",
-         *       "status": "completed",
+         *       "user_text": "Поставь встречу с Иваном завтра",
+         *       "assistant_text": "На какое время поставить встречу?",
+         *       "status": "needs_clarification",
          *       "intent": "create_entry",
          *       "entries": []
          *     }
@@ -332,9 +462,52 @@ export interface components {
             /** @enum {string} */
             status: "completed" | "needs_clarification" | "no_action";
             /** @enum {string} */
-            intent: "create_entry" | "list_entries" | "search_entries" | "complete_entry" | "update_entry" | "delete_entry" | "unknown";
-            /** @description Созданные, найденные или изменённые записи; при выборе цели содержит варианты. */
+            intent: "create_entry" | "list_entries" | "search_entries" | "update_entry" | "delete_entry" | "complete_entry" | "unknown";
+            /** @description Созданные или найденные записи; пустой список при уточнении. */
             entries: components["schemas"]["Entry"][];
+            /** @description Короткие ответы для кнопок под сообщением («Да», «Нет», «Отмени последнее»). */
+            suggestions?: string[];
+        };
+        /**
+         * @description Внутренний структурированный ответ внешней модели. Backend проверяет его
+         *     перед сохранением или поиском; фронтенд этот объект не отправляет.
+         *     Для create_entry нужны kind и title; date и time обязательны для встречи
+         *     и напоминания. Для list_entries нужны date_from/date_to, для
+         *     search_entries — query. Для complete_entry, update_entry и delete_entry
+         *     используются target_query и необязательные target_date/target_time.
+         *     При update_entry новые значения передаются в new_title/date/time/duration_minutes.
+         *     date_phrase и time_phrase должны содержать
+         *     точные фразы пользователя, подтверждающие дату и время. duration_phrase
+         *     содержит слова о длительности встречи; без них сервер применяет 60 минут
+         *     при создании и сохраняет прежнюю длительность при переносе. Отсутствующие
+         *     данные модель возвращает как null; обязательность для выполнения
+         *     конкретного действия проверяет сервер.
+         */
+        AssistantCommand: {
+            /** @enum {string} */
+            action: "create_entry" | "list_entries" | "search_entries" | "complete_entry" | "update_entry" | "delete_entry" | "unknown";
+            /** @enum {string|null} */
+            kind: "task" | "reminder" | "meeting" | null;
+            title: string | null;
+            /** Format: date */
+            date: string | null;
+            date_phrase: string | null;
+            time: string | null;
+            time_phrase: string | null;
+            duration_minutes: number | null;
+            duration_phrase: string | null;
+            /** Format: date */
+            date_from: string | null;
+            /** Format: date */
+            date_to: string | null;
+            query: string | null;
+            target_query: string | null;
+            /** Format: date */
+            target_date: string | null;
+            target_date_phrase: string | null;
+            target_time: string | null;
+            target_time_phrase: string | null;
+            new_title: string | null;
         };
         ConversationMessage: {
             /** Format: uuid */
@@ -349,6 +522,49 @@ export interface components {
         EntryKind: "task" | "reminder" | "meeting";
         /** @enum {string} */
         EntryStatus: "pending" | "completed" | "cancelled";
+        /**
+         * @description Повтор записи; null — разовая.
+         * @enum {string|null}
+         */
+        Recurrence: "daily" | "weekdays" | "weekly" | "monthly" | null;
+        VoiceInfo: {
+            /** @example alina */
+            id: string;
+            /** @example Алина */
+            name: string;
+            /** @example мужской голос */
+            description: string;
+        };
+        DailySummary: {
+            assistant_text: string;
+            entries: components["schemas"]["Entry"][];
+        };
+        ServiceState: {
+            /** @example Понимание команд */
+            name: string;
+            /** @enum {string} */
+            state: "ok" | "loading" | "error" | "off";
+            detail: string;
+        };
+        ServicesStatus: {
+            services: components["schemas"]["ServiceState"][];
+        };
+        VoiceList: {
+            available: boolean;
+            loading: boolean;
+            voices: components["schemas"]["VoiceInfo"][];
+        };
+        SessionInfo: {
+            /** Format: uuid */
+            user_id: string;
+            access_code_required: boolean;
+            unlocked: boolean;
+            /** @example gigachat */
+            llm_provider: string;
+            asr_enabled: boolean;
+            /** @description false — сервер запущен без голоса (VOICE_ENABLED=false), только текст */
+            voice_enabled: boolean;
+        };
         /** @description Статус выполнения и дата изменения не обязательны для MVP. */
         Entry: {
             /** Format: uuid */
@@ -365,8 +581,9 @@ export interface components {
             time: string | null;
             /** @example Europe/Moscow */
             timezone: string;
-            /** @description Длительность встречи; по умолчанию 60 минут. Для остальных типов null. */
+            /** @description Длительность встречи; для остальных типов null. */
             duration_minutes?: number | null;
+            recurrence?: components["schemas"]["Recurrence"];
             status?: components["schemas"]["EntryStatus"];
             /**
              * Format: date-time
@@ -388,6 +605,7 @@ export interface components {
             /** @example Europe/Moscow */
             timezone: string;
             duration_minutes?: number | null;
+            recurrence?: components["schemas"]["Recurrence"];
         };
         EntryUpdate: {
             title?: string;
@@ -396,6 +614,7 @@ export interface components {
             time?: string | null;
             timezone?: string;
             duration_minutes?: number | null;
+            recurrence?: components["schemas"]["Recurrence"];
             status?: components["schemas"]["EntryStatus"];
         };
         EntryList: {
@@ -430,6 +649,24 @@ export interface components {
                 "application/json": components["schemas"]["ErrorResponse"];
             };
         };
+        /** @description Нужен или неверен код доступа */
+        Unauthorized: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["ErrorResponse"];
+            };
+        };
+        /** @description Превышен лимит запросов */
+        TooManyRequests: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["ErrorResponse"];
+            };
+        };
         /** @description Не удалось выполнить операцию */
         InternalError: {
             headers: {
@@ -439,7 +676,7 @@ export interface components {
                 "application/json": components["schemas"]["ErrorResponse"];
             };
         };
-        /** @description Обработка команд ассистента пока не подключена */
+        /** @description Обработка команд ассистента не подключена (нет ключа GigaChat) */
         NotImplemented: {
             headers: {
                 [name: string]: unknown;
@@ -468,6 +705,181 @@ export interface components {
 }
 export type $defs = Record<string, never>;
 export interface operations {
+    getSession: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Сессия браузера */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SessionInfo"];
+                };
+            };
+        };
+    };
+    unlockSession: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    code: string;
+                };
+            };
+        };
+        responses: {
+            /** @description Код принят, кука обновлена */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: components["responses"]["Unauthorized"];
+            429: components["responses"]["TooManyRequests"];
+        };
+    };
+    listUndatedEntries: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Записи без даты, невыполненные первыми */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EntryList"];
+                };
+            };
+        };
+    };
+    getCalendarLink: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Персональная ссылка */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        url: string;
+                    };
+                };
+            };
+        };
+    };
+    getCalendarFeed: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                token: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Файл iCalendar */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/calendar": string;
+                };
+            };
+            404: components["responses"]["NotFound"];
+        };
+    };
+    rotateCalendarLink: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Новая ссылка */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        url: string;
+                    };
+                };
+            };
+        };
+    };
+    getDailySummary: {
+        parameters: {
+            query: {
+                timezone: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Текст сводки и записи */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DailySummary"];
+                };
+            };
+        };
+    };
+    getServicesStatus: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Список сервисов */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ServicesStatus"];
+                };
+            };
+        };
+    };
     getHealth: {
         parameters: {
             query?: never;
@@ -575,6 +987,7 @@ export interface operations {
                 content?: never;
             };
             422: components["responses"]["ValidationError"];
+            429: components["responses"]["TooManyRequests"];
             501: components["responses"]["NotImplemented"];
             502: components["responses"]["ExternalModelError"];
         };
@@ -631,6 +1044,7 @@ export interface operations {
                 content?: never;
             };
             422: components["responses"]["ValidationError"];
+            429: components["responses"]["TooManyRequests"];
             501: components["responses"]["NotImplemented"];
             502: components["responses"]["ExternalModelError"];
         };
@@ -810,6 +1224,26 @@ export interface operations {
             422: components["responses"]["ValidationError"];
         };
     };
+    listVoices: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Список голосов */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["VoiceList"];
+                };
+            };
+        };
+    };
     synthesizeSpeech: {
         parameters: {
             query?: never;
@@ -822,6 +1256,11 @@ export interface operations {
                 "application/json": {
                     /** @example Напоминание на завтра, 10:00, создано. */
                     text: string;
+                    /**
+                     * @default alina
+                     * @example alina
+                     */
+                    voice?: string;
                 };
             };
         };
@@ -832,10 +1271,20 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "audio/mpeg": string;
+                    "audio/wav": string;
                 };
             };
+            404: components["responses"]["NotFound"];
             422: components["responses"]["ValidationError"];
+            /** @description Озвучка отключена или ещё загружается */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
         };
     };
 }

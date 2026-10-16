@@ -1,3 +1,5 @@
+import contextvars
+import dataclasses
 import datetime
 import hashlib
 import json
@@ -7,15 +9,24 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from src.ports.command_extractor import CommandExtractor
 from src.ports.conversations import ConversationRepository
-from src.schemas.assistant import AssistantIntent, AssistantStatus, AssistantTurn, Entry, EntryKind, EntryStatus, EntryUpdate
+from src.schemas.assistant import (AssistantIntent, AssistantStatus, AssistantTurn, Entry, EntryKind,
+                                   EntryStatus, EntryUpdate)
 from src.schemas.assistant_command import AssistantCommand
 from src.schemas.dialogue import DialogueTransition, PendingStep, ReplyAct, ScheduleRole
+from src.services import phrasing
 from src.services.command_interpreter import CommandInterpreter
 from src.services.dialogue_interpreter import DialogueInterpreter
 from src.services.entries import EntryService
+from src.services.guards import (CHOICE_WORDS, DONE_RE, HELP_SUGGESTIONS, HELP_TEXT, PAST_WORDS_RE,
+                                 UNDO_RE, UNDO_TEXT, find_shift, is_short_unclear, yes_no)
+from src.services.recurrence import find_recurrence, first_date, next_occurrence
+from src.user_context import current_user
 from src.services.temporal import (ambiguous_time_options, ambiguous_time_phrase,
-                                   parse_date, parse_duration, parse_time,
+                                   parse_date, parse_duration, parse_target_date, parse_time,
                                    replacement_schedule_reply, resolve_time_clarification)
+
+_now: contextvars.ContextVar[datetime.datetime | None] = contextvars.ContextVar('assistant_now', default=None)
+UNDO_FIELDS = ('title', 'date', 'time', 'duration_minutes', 'recurrence', 'status')
 
 
 class InvalidTimezoneError(ValueError):
@@ -74,14 +85,39 @@ class AssistantService:
         }
         return questions[missing[0]]
 
+    @staticmethod
+    def _now() -> datetime.datetime:
+        return _now.get() or datetime.datetime.now()
+
+    @classmethod
+    def _today(cls) -> datetime.date:
+        return cls._now().date()
+
+    @staticmethod
+    def _suggestions(status: AssistantStatus, intent: AssistantIntent, pending: AssistantCommand | None,
+                     undo: dict | None, answer: str) -> list[str]:
+        if status == AssistantStatus.needs_clarification and pending is not None:
+            if pending.confirm or (pending.candidate_ids and len(pending.candidate_ids) == 1):
+                return ['Да', 'Нет']
+            if pending.candidate_ids:
+                return list(CHOICE_WORDS[:min(len(pending.candidate_ids), len(CHOICE_WORDS))]) + ['Отмена']
+            return ['Отмена']
+        if status == AssistantStatus.completed and undo:
+            return [UNDO_TEXT]
+        if intent == AssistantIntent.unknown and answer == HELP_TEXT:
+            return list(HELP_SUGGESTIONS)
+        return []
+
     def _turn(
         self, conversation_id: uuid.UUID, text: str, command: AssistantCommand,
         answer: str, status: AssistantStatus, entries: list[Entry],
-        pending: AssistantCommand | None = None,
+        pending: AssistantCommand | None = None, undo: dict | None = None,
     ) -> AssistantTurn:
+        shown_pending = pending if status == AssistantStatus.needs_clarification else None
         turn = AssistantTurn(
             conversation_id=conversation_id, turn_id=uuid.uuid4(), user_text=text,
             assistant_text=answer, status=status, intent=command.action, entries=entries,
+            suggestions=self._suggestions(status, command.action, shown_pending, undo, answer),
         )
         if self._conversations is not None:
             if pending is not None and status == AssistantStatus.needs_clarification:
@@ -89,6 +125,8 @@ class AssistantService:
                     'pending_step': self._pending_step(pending),
                 })
             self._conversations.save_turn(turn, pending)
+            if undo is not None and hasattr(self._conversations, 'set_undo'):
+                self._conversations.set_undo(conversation_id, undo or None)
         return turn
 
     @staticmethod
@@ -109,49 +147,43 @@ class AssistantService:
             return 'Какую запись вы имеете в виду?'
         return 'Уточните, пожалуйста, ваш ответ.'
 
-    @staticmethod
-    def _candidate_question(entries: list[Entry], *, semantic: bool = False) -> str:
-        choices = []
-        for index, entry in enumerate(entries, 1):
-            when = f' — {entry.date.isoformat()}' if entry.date else ''
-            when += f' в {entry.time}' if entry.time else ''
-            choices.append(f'{index}. {entry.title}{when}')
+    @classmethod
+    def _candidate_question(cls, entries: list[Entry], *, semantic: bool = False) -> str:
+        today = cls._today()
+        choices = [f'{index}. {entry.title} — {phrasing.when(entry, today)}'
+                   for index, entry in enumerate(entries, 1)]
         if semantic and len(entries) == 1:
-            return f'Вы имели в виду «{entries[0].title}»? Ответьте «да» или «нет».'
+            return (f'Вы имели в виду «{entries[0].title}» ({phrasing.when(entries[0], today)})? '
+                    'Ответьте «да» или «нет».')
         return 'Какую запись вы имели в виду? Ответьте номером:\n' + '\n'.join(choices)
 
     @staticmethod
     def _has_update_value(command: AssistantCommand) -> bool:
-        return any((command.new_title, command.date, command.time, command.duration_minutes))
+        return any((command.new_title, command.date, command.time, command.duration_minutes,
+                    command.shift_minutes))
 
     @classmethod
     def _needs_update_details(cls, command: AssistantCommand) -> bool:
         return (ambiguous_time_options(command.time_phrase) is not None
                 and command.time is None) or not cls._has_update_value(command) or (
             command.move_intent and command.date is None and command.time is None
+            and not command.shift_minutes
         )
 
-    @staticmethod
-    def _meeting_schedule(entry: Entry, *, default: bool = False) -> str:
+    @classmethod
+    def _meeting_schedule(cls, entry: Entry, *, default: bool = False) -> str:
         if entry.date is None or entry.time is None:
             return 'без даты и времени'
-        duration = entry.duration_minutes or 60
-        start = datetime.datetime.combine(entry.date, datetime.time.fromisoformat(entry.time))
-        end = start + datetime.timedelta(minutes=duration)
-        next_day = ' (+1 день)' if end.date() > start.date() else ''
-        note = ' по умолчанию' if default else ''
-        return (f'{entry.date.isoformat()} {entry.time}–{end:%H:%M}{next_day} '
-                f'({duration} мин{note})')
+        note = ' (длительность по умолчанию — час)' if default else ''
+        return phrasing.when(entry, cls._today()) + note
 
-    @staticmethod
-    def _update_question(command: AssistantCommand, entry: Entry) -> str:
+    @classmethod
+    def _update_question(cls, command: AssistantCommand, entry: Entry) -> str:
         options = ambiguous_time_options(command.time_phrase)
         if command.time is None and options:
             return f'Для «{entry.title}» уточните время: {options[0]} или {options[1]}?'
         if command.move_intent:
-            when = entry.date.isoformat() if entry.date else 'без даты'
-            if entry.time:
-                when += f' в {entry.time}'
+            when = phrasing.when(entry, cls._today())
             if entry.kind == EntryKind.meeting:
                 when += f', длительность {entry.duration_minutes or 60} мин'
             return (
@@ -160,60 +192,163 @@ class AssistantService:
             )
         return f'Что изменить в записи «{entry.title}»: название, дату, время или длительность?'
 
+    @classmethod
+    def _past_note(cls, date: datetime.date | None, time: str | None, *, explicit: bool) -> str | None:
+        """Explain why a date is suspicious. A past day counts only if the user named it
+        («вчера», «в прошлую пятницу»): a model must not move a record into the past silently."""
+        if date is None:
+            return None
+        now = cls._now()
+        today = now.date()
+        if date < today and explicit:
+            return (f'{phrasing.format_date(date, today).capitalize()} — это '
+                    f'{phrasing.format_day(date, today)}, этот день уже прошёл.')
+        if date == today and time is not None and time < now.strftime('%H:%M'):
+            return f'Сегодня в {time} — это время уже прошло.'
+        return None
+
+    def _conflict(self, kind: EntryKind | None, date: datetime.date | None, time: str | None,
+                  duration: int | None, exclude: uuid.UUID | None = None) -> Entry | None:
+        if kind != EntryKind.meeting or date is None or time is None or self._entries is None:
+            return None
+        start = datetime.datetime.combine(date, datetime.time.fromisoformat(time))
+        end = start + datetime.timedelta(minutes=duration or 60)
+        for other in self._entries.list_period(date, date, kind=EntryKind.meeting):
+            if other.id == exclude or other.time is None or other.status == EntryStatus.completed:
+                continue
+            other_start = datetime.datetime.combine(date, datetime.time.fromisoformat(other.time))
+            other_end = other_start + datetime.timedelta(minutes=other.duration_minutes or 60)
+            if start < other_end and other_start < end:
+                return other
+        return None
+
+    @staticmethod
+    def _list_answer(command: AssistantCommand, entries: list[Entry], today: datetime.date) -> str:
+        start, end = command.date_from, command.date_to
+        if start == end:
+            label = f'На {phrasing.format_date(start, today)}' if abs((start - today).days) <= 2 else \
+                f'На {phrasing.format_day(start, today)}'
+        else:
+            label = f'С {phrasing.format_day(start, today)} по {phrasing.format_day(end, today)}'
+        noun = {EntryKind.task: ('задача', 'задачи', 'задач'),
+                EntryKind.reminder: ('напоминание', 'напоминания', 'напоминаний'),
+                EntryKind.meeting: ('встреча', 'встречи', 'встреч')}.get(command.kind, ('запись', 'записи', 'записей'))
+        if not entries:
+            return f'{label} {noun[2]} нет.'
+        lines = [phrasing.entry_line(e, today, show_date=start != end) for e in entries]
+        return f'{label} {len(entries)} {phrasing.plural(len(entries), *noun)}:\n' + '\n'.join(lines)
+
+    @staticmethod
+    def _undo(op: str, entry: Entry) -> dict:
+        return {'op': op, 'entry': entry.model_dump(mode='json')}
+
     def _mutate(
         self, conversation_id: uuid.UUID, text: str, command: AssistantCommand,
         entry: Entry,
     ) -> AssistantTurn:
+        today = self._today()
+        forced = set(command.forced or [])
         if command.action == AssistantIntent.complete_entry:
-            if entry.kind != EntryKind.task:
+            if entry.kind == EntryKind.meeting:
                 return self._turn(conversation_id, text, command,
-                                  'Отметить выполненной можно только задачу.',
+                                  'Отметить выполненной можно задачу или напоминание.',
                                   AssistantStatus.no_action, [])
             if entry.status == EntryStatus.completed:
                 return self._turn(conversation_id, text, command,
-                                  f'Задача уже выполнена: {entry.title}.',
+                                  f'Уже выполнено: «{entry.title}».',
                                   AssistantStatus.completed, [entry])
+            stored = self._entries.get(entry.id) or entry
+            if stored.recurrence is not None and stored.date is not None:
+                base = max(stored.date, today)
+                following = next_occurrence(stored.date, stored.recurrence, base)
+                if following is not None:
+                    moved = self._entries.update(entry.id, EntryUpdate(date=following))
+                    answer = (f'Отметил: «{stored.title}» за {phrasing.format_date(base, today)}. '
+                              f'Следующий раз — {phrasing.format_date(following, today)}.')
+                    return self._turn(conversation_id, text, command, answer, AssistantStatus.completed,
+                                      [moved], undo=self._undo('update', stored))
             updated = self._entries.update(entry.id, EntryUpdate(status=EntryStatus.completed))
-            answer = f'Отмечено выполненным: {entry.title}.'
+            answer = f'Отметил выполненной: {phrasing.KIND_NOM[entry.kind]} «{entry.title}».'
+            undo = self._undo('update', stored)
         elif command.action == AssistantIntent.update_entry:
             changes = {}
+            if command.shift_minutes and entry.date is not None:
+                start = datetime.datetime.combine(
+                    entry.date, datetime.time.fromisoformat(entry.time) if entry.time else datetime.time(0, 0))
+                moved = start + datetime.timedelta(minutes=command.shift_minutes)
+                command = command.model_copy(update={
+                    'date': moved.date(), 'time': moved.strftime('%H:%M') if entry.time else None,
+                    'shift_minutes': None,
+                })
+            elif command.shift_minutes:
+                return self._turn(conversation_id, text, command,
+                                  f'У записи «{entry.title}» нет даты — назовите день и время.',
+                                  AssistantStatus.no_action, [entry])
             if command.new_title is not None:
-                changes['title'] = command.new_title
+                changes['title'] = phrasing.capitalize(command.new_title)
             if command.date is not None:
                 changes['date'] = command.date
             if command.time is not None:
                 changes['time'] = command.time
             if command.duration_minutes is not None:
                 changes['duration_minutes'] = command.duration_minutes
+            new_date = changes.get('date', entry.date)
+            new_time = changes.get('time', entry.time)
+            if ('date' in changes or 'time' in changes) and 'past' not in forced:
+                note = self._past_note(new_date, new_time,
+                                       explicit=bool(PAST_WORDS_RE.search(text)) or 'past_words' in forced)
+                if note:
+                    pending = command.model_copy(update={
+                        'confirm': 'past', 'confirm_entry_id': entry.id, 'candidate_ids': None,
+                    })
+                    return self._turn(conversation_id, text, command,
+                                      f'{note} Всё равно перенести? Или назовите другую дату.',
+                                      AssistantStatus.needs_clarification, [entry], pending)
+            if {'date', 'time', 'duration_minutes'} & set(changes) and 'conflict' not in forced:
+                clash = self._conflict(entry.kind, new_date, new_time,
+                                       changes.get('duration_minutes', entry.duration_minutes), entry.id)
+                if clash is not None:
+                    pending = command.model_copy(update={
+                        'confirm': 'conflict', 'confirm_entry_id': entry.id, 'candidate_ids': None,
+                    })
+                    return self._turn(conversation_id, text, command,
+                                      f'В это время уже есть {phrasing.describe(clash, today)}. '
+                                      'Всё равно перенести? Или назовите другое время.',
+                                      AssistantStatus.needs_clarification, [clash], pending)
             try:
                 updated = self._entries.update(entry.id, EntryUpdate(**changes))
             except ValueError as exc:
                 return self._turn(conversation_id, text, command, str(exc),
                                   AssistantStatus.no_action, [])
-            if updated and command.move_intent:
-                if updated.kind == EntryKind.meeting:
-                    when = self._meeting_schedule(updated)
-                else:
-                    when = updated.date.isoformat() if updated.date else 'без даты'
-                    if updated.time:
-                        when += f' в {updated.time}'
-                answer = f'Перенесено: {updated.title} — {when}.'
+            undo = self._undo('update', entry)
+            if updated is None:
+                answer = 'Запись больше не найдена.'
+            elif 'title' in changes and len(changes) == 1:
+                answer = f'Готово, переименовал {phrasing.KIND_ACC[updated.kind]} в «{updated.title}».'
             else:
-                answer = (f'Изменено: {updated.title} — {self._meeting_schedule(updated)}.'
-                          if updated and updated.kind == EntryKind.meeting
-                          else f'Изменено: {updated.title}.' if updated
-                          else 'Запись больше не найдена.')
+                answer = (f'Готово: {phrasing.KIND_NOM[updated.kind]} «{updated.title}» — '
+                          f'теперь {phrasing.when(updated, today)}.')
+                if 'duration_minutes' in changes and updated.kind == EntryKind.meeting:
+                    answer = answer[:-1] + f', длительность {updated.duration_minutes} мин.'
         else:
+            if 'delete' not in forced:
+                pending = command.model_copy(update={
+                    'confirm': 'delete', 'confirm_entry_id': entry.id, 'candidate_ids': None,
+                })
+                return self._turn(conversation_id, text, command,
+                                  f'Удалить {phrasing.describe(entry, today, accusative=True)}?',
+                                  AssistantStatus.needs_clarification, [entry], pending)
             if not self._entries.delete(entry.id):
                 return self._turn(conversation_id, text, command,
                                   'Запись больше не найдена.', AssistantStatus.no_action, [])
             return self._turn(conversation_id, text, command,
-                              f'Удалено: {entry.title}.', AssistantStatus.completed, [])
+                              f'Удалил {phrasing.KIND_ACC[entry.kind]} «{entry.title}».',
+                              AssistantStatus.completed, [], undo=self._undo('delete', entry))
         if updated is None:
             return self._turn(conversation_id, text, command,
                               'Запись больше не найдена.', AssistantStatus.no_action, [])
         return self._turn(conversation_id, text, command,
-                          answer, AssistantStatus.completed, [updated])
+                          answer, AssistantStatus.completed, [updated], undo=undo)
 
     def handle_message(
         self,
@@ -227,7 +362,8 @@ class AssistantService:
             request_id = request_id or uuid.uuid4()
             fingerprint = request_fingerprint or hashlib.sha256(json.dumps(
                 {'source': 'text', 'text': text, 'timezone': timezone,
-                 'conversation_id': str(conversation_id) if conversation_id else None},
+                 'conversation_id': str(conversation_id) if conversation_id else None,
+                 'user': current_user()},
                 ensure_ascii=False, sort_keys=True,
             ).encode('utf-8')).hexdigest()
             return self._requests.execute_once(
@@ -241,12 +377,168 @@ class AssistantService:
         self, text: str, timezone: str, conversation_id: uuid.UUID | None,
     ) -> AssistantTurn:
         try:
-            today = datetime.datetime.now(ZoneInfo(timezone)).date()
+            zone = ZoneInfo(timezone)
+            now = (_now.get() or datetime.datetime.now(zone)).replace(tzinfo=None)
         except (ZoneInfoNotFoundError, ValueError) as exc:
             raise InvalidTimezoneError('Укажите корректный часовой пояс IANA') from exc
+        token = _now.set(now)
+        try:
+            return self._handle_at(text, timezone, conversation_id, now.date())
+        finally:
+            _now.reset(token)
 
+    def _guard(
+        self, conversation_id: uuid.UUID, text: str, timezone: str,
+        state,
+    ) -> tuple[AssistantTurn | None, object]:
+        """Our checks that run before the dialogue engine: undo, confirmations, «я купил»."""
+        previous = state.pending_command if state is not None else None
+        if UNDO_RE.match(text):
+            return self._undo_last(conversation_id, text), state
+        if previous is not None and previous.confirm:
+            turn = self._on_confirm(conversation_id, text, timezone, previous)
+            if turn is not None:
+                return turn, state
+            return None, dataclasses.replace(state, pending_command=None)
+        if previous is None and yes_no(text) and len(text.split()) <= 2:
+            command = AssistantCommand(action=AssistantIntent.unknown)
+            return self._turn(conversation_id, text, command,
+                              'Сейчас я ничего не спрашивал. Скажите команду целиком, '
+                              'например «Удали встречу с Иваном».', AssistantStatus.no_action, []), state
+        done = DONE_RE.match(text) if previous is None else None
+        if done and self._entries is not None:
+            matches, exact = self._entries.find_candidates(done.group('what'), kind=None)
+            pending = [e for e in matches if e.status == EntryStatus.pending and e.kind != EntryKind.meeting]
+            if exact and len(pending) == 1:
+                command = AssistantCommand(action=AssistantIntent.complete_entry, target_query=done.group('what'))
+                return self._mutate(conversation_id, text, command, pending[0]), state
+        return None, state
+
+    def _on_confirm(self, conversation_id: uuid.UUID, text: str, timezone: str,
+                    previous: AssistantCommand) -> AssistantTurn | None:
+        answer = yes_no(text)
+        kind = previous.confirm
+        base = previous.model_copy(update={'confirm': None, 'confirm_entry_id': None})
+        entry = self._entries.get(previous.confirm_entry_id) if previous.confirm_entry_id else None
+        new_date = parse_date(text, self._today()) if kind in ('past', 'conflict') else None
+        new_time = parse_time(text) if kind in ('past', 'conflict') else None
+        if new_date or new_time:
+            changed = base.model_copy(update={'date': new_date or base.date, 'time': new_time or base.time})
+            if changed.action == AssistantIntent.create_entry:
+                return self._create(conversation_id, text, changed, timezone)
+            if entry is not None:
+                return self._mutate(conversation_id, text, changed, entry)
+        if answer == 'yes':
+            forced = base.model_copy(update={'forced': sorted(set(base.forced or []) | {kind})})
+            if forced.action == AssistantIntent.create_entry:
+                return self._create(conversation_id, text, forced, timezone)
+            if entry is None:
+                return self._turn(conversation_id, text, base, 'Этой записи уже нет.',
+                                  AssistantStatus.no_action, [])
+            return self._mutate(conversation_id, text, forced, entry)
+        if answer == 'no':
+            verb = {'delete': 'не удаляю', 'past': 'не ставлю', 'conflict': 'не ставлю'}[kind]
+            if base.action == AssistantIntent.update_entry and kind != 'delete':
+                verb = 'не переношу'
+            return self._turn(conversation_id, text, base, f'Хорошо, {verb}.', AssistantStatus.no_action, [])
+        if is_short_unclear(text):
+            last = next((m.text for m in reversed(self._conversations.get(conversation_id).messages)
+                         if m.role == 'assistant'), '') if self._conversations else ''
+            question = last.removeprefix('Не понял ответ. ').split(' Ответьте «да»')[0]
+            return self._turn(conversation_id, text, base,
+                              f'Не понял ответ. {question} Ответьте «да» или «нет».',
+                              AssistantStatus.needs_clarification, [entry] if entry else [], previous)
+        return None
+
+    def _undo_last(self, conversation_id: uuid.UUID, text: str) -> AssistantTurn:
+        record = (self._conversations.get_undo(conversation_id)
+                  if hasattr(self._conversations, 'get_undo') else None)
+        nothing = AssistantCommand(action=AssistantIntent.unknown)
+        if not record or self._entries is None:
+            return self._turn(conversation_id, text, nothing,
+                              'Отменять нечего: в этом диалоге я ещё ничего не менял.', AssistantStatus.no_action, [])
+        saved = Entry.model_validate(record['entry'])
+        today = self._today()
+        if record['op'] == 'create':
+            gone = self._entries.delete(saved.id)
+            command = AssistantCommand(action=AssistantIntent.delete_entry)
+            answer = (f'Отменил: убрал {phrasing.KIND_ACC[saved.kind]} «{saved.title}».' if gone
+                      else 'Этой записи уже нет, отменять нечего.')
+            return self._turn(conversation_id, text, command, answer,
+                              AssistantStatus.completed if gone else AssistantStatus.no_action, [], undo={})
+        if record['op'] == 'delete':
+            restored = self._entries.restore(saved) if self._entries.get(saved.id) is None else saved
+            command = AssistantCommand(action=AssistantIntent.create_entry)
+            return self._turn(conversation_id, text, command,
+                              f'Вернул {phrasing.describe(restored, today, accusative=True)}.',
+                              AssistantStatus.completed, [restored], undo={})
+        if self._entries.get(saved.id) is None:
+            return self._turn(conversation_id, text, nothing, 'Этой записи уже нет, отменять нечего.',
+                              AssistantStatus.no_action, [], undo={})
+        fields = {name: getattr(saved, name) for name in UNDO_FIELDS}
+        fields = {k: v for k, v in fields.items() if v is not None or k in ('date', 'time', 'recurrence')}
+        try:
+            restored = self._entries.update(saved.id, EntryUpdate(**fields))
+        except ValueError as exc:
+            return self._turn(conversation_id, text, nothing, f'Не получилось вернуть: {exc}',
+                              AssistantStatus.no_action, [])
+        command = AssistantCommand(action=AssistantIntent.update_entry)
+        return self._turn(conversation_id, text, command,
+                          f'Вернул как было: {phrasing.describe(restored, today)}.',
+                          AssistantStatus.completed, [restored], undo={})
+
+    def _create(self, conversation_id: uuid.UUID, text: str, command: AssistantCommand,
+                timezone: str) -> AssistantTurn:
+        today = self._today()
+        forced = set(command.forced or [])
+        title = phrasing.capitalize(command.title)
+        if command.recurrence is not None and command.date is None:
+            command = command.model_copy(update={'date': first_date(command.recurrence, today)})
+        if 'past' not in forced and command.recurrence is None:
+            note = self._past_note(command.date, command.time,
+                                   explicit=bool(PAST_WORDS_RE.search(text)) or 'past_words' in forced)
+            if note:
+                pending = command.model_copy(update={'confirm': 'past'})
+                return self._turn(conversation_id, text, command,
+                                  f'{note} Всё равно поставить на эту дату? Или назовите другую.',
+                                  AssistantStatus.needs_clarification, [], pending)
+        if 'conflict' not in forced:
+            clash = self._conflict(command.kind, command.date, command.time, command.duration_minutes)
+            if clash is not None:
+                pending = command.model_copy(update={'confirm': 'conflict'})
+                return self._turn(conversation_id, text, command,
+                                  f'В это время уже есть {phrasing.describe(clash, today)}. '
+                                  'Всё равно поставить? Или назовите другое время.',
+                                  AssistantStatus.needs_clarification, [clash], pending)
+        extra = {'recurrence': command.recurrence} if command.recurrence is not None else {}
+        entry, created = self._entries.create_once(
+            kind=command.kind, title=title, date=command.date,
+            time=command.time, timezone=timezone,
+            duration_minutes=command.duration_minutes, **extra,
+        )
+        if not created:
+            return self._turn(conversation_id, text, command,
+                              f'Такая запись уже есть: {phrasing.describe(entry, today)}.',
+                              AssistantStatus.completed, [entry])
+        answer = f'Готово, создал {phrasing.KIND_ACC[entry.kind]}: «{entry.title}», {phrasing.when(entry, today)}.'
+        if entry.kind == EntryKind.meeting and command.duration_minutes is None and entry.time:
+            answer = answer[:-1] + ' (длительность по умолчанию — час).'
+        return self._turn(conversation_id, text, command, answer, AssistantStatus.completed, [entry],
+                          undo=self._undo('create', entry))
+
+    def _handle_at(
+        self, text: str, timezone: str, conversation_id: uuid.UUID | None, today: datetime.date,
+    ) -> AssistantTurn:
+        if (conversation_id is not None and self._conversations is not None
+                and hasattr(self._conversations, 'is_foreign')
+                and self._conversations.is_foreign(conversation_id)):
+            conversation_id = None
         conversation_id = conversation_id or uuid.uuid4()
         state = self._conversations.get(conversation_id) if self._conversations else None
+        if self._conversations is not None:
+            guarded, state = self._guard(conversation_id, text, timezone, state)
+            if guarded is not None:
+                return guarded
         plan = self._dialogue.plan(text, timezone, today, state)
         previous = plan.previous
         pending_step = plan.pending_step
@@ -315,6 +607,10 @@ class AssistantService:
                         self._update_question(selected_command, selected),
                         AssistantStatus.needs_clarification, [selected], selected_command,
                     )
+                if selected_command.action == AssistantIntent.delete_entry:
+                    selected_command = selected_command.model_copy(update={
+                        'forced': sorted(set(selected_command.forced or []) | {'delete'}),
+                    })
                 return self._mutate(conversation_id, text, selected_command, selected)
             if not candidates:
                 return self._turn(
@@ -372,13 +668,31 @@ class AssistantService:
         previous = resolved.previous
         explicit_target = resolved.explicit_target
         pronoun_reference = resolved.pronoun_reference
+        if command.action == AssistantIntent.update_entry:
+            shift = find_shift(text)
+            if shift:
+                # «на 2 дня» is a shift, not «в 2 часа дня»: the explicit shift phrase wins.
+                command = command.model_copy(update={'shift_minutes': shift, 'move_intent': True,
+                                                     'date': None, 'time': None, 'time_phrase': None})
+        if command.action == AssistantIntent.create_entry:
+            grounded = {}
+            rule = find_recurrence(text)
+            if rule is not None:
+                grounded['recurrence'] = rule
+            if command.date is None and PAST_WORDS_RE.search(text):
+                past = parse_target_date(text, today)
+                if past is not None and past < today:
+                    grounded['date'] = past
+                    grounded['forced'] = sorted(set(command.forced or []) | {'past_words'})
+            if grounded:
+                command = command.model_copy(update=grounded)
         missing = self._missing(command)
 
         result_entries = []
         status = AssistantStatus.no_action
         pending = None
         if command.action == AssistantIntent.unknown:
-            answer = 'Не удалось определить действие по запросу.'
+            answer = HELP_TEXT
         elif missing and (self._entries is None or self._conversations is None):
             answer = f"Не хватает данных: {', '.join(missing)}. Диалог уточнения не подключён."
         elif missing:
@@ -387,30 +701,18 @@ class AssistantService:
         elif self._entries is None:
             answer = 'Команда распознана, но запись и поиск пока не подключены. Действие не выполнено.'
         elif command.action == AssistantIntent.create_entry:
-            entry, created = self._entries.create_once(
-                kind=command.kind, title=command.title, date=command.date,
-                time=command.time, timezone=timezone,
-                duration_minutes=command.duration_minutes,
-            )
-            result_entries = [entry]
-            answer = (
-                f'Сохранено: {entry.title}.' if created
-                else f'Такая запись уже есть: {entry.title}.'
-            )
-            if entry.kind == EntryKind.meeting:
-                answer += (' ' + self._meeting_schedule(
-                    entry, default=created and command.duration_minutes is None,
-                ) + '.')
-            status = AssistantStatus.completed
+            return self._create(conversation_id, text, command, timezone)
         elif command.action == AssistantIntent.list_entries:
             result_entries = self._entries.list_period(
                 command.date_from, command.date_to, kind=command.kind,
             )
-            answer = f'Найдено записей: {len(result_entries)}.'
+            answer = self._list_answer(command, result_entries, today)
             status = AssistantStatus.completed
         elif command.action == AssistantIntent.search_entries:
             result_entries = self._entries.search(command.query, kind=command.kind)
-            answer = f'Найдено записей: {len(result_entries)}.'
+            answer = ('Нашёл:\n' + '\n'.join(phrasing.entry_line(e, today, show_date=True)
+                                             for e in result_entries)
+                      if result_entries else f'Не нашёл ничего похожего на «{command.query}».')
             status = AssistantStatus.completed
         elif command.action in (
             AssistantIntent.complete_entry, AssistantIntent.update_entry,

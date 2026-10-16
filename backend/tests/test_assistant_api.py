@@ -119,3 +119,19 @@ class AssistantApiTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+PINNED_NOW = None
+
+
+def setUpModule():
+    """Pin «now» to 08:00 today so same-day times in fixtures are never in the past."""
+    global PINNED_NOW
+    import datetime as _dt
+    from src.services import assistant as _assistant
+    PINNED_NOW = _assistant._now.set(_dt.datetime.now().replace(hour=8, minute=0, second=0, microsecond=0))
+
+
+def tearDownModule():
+    from src.services import assistant as _assistant
+    _assistant._now.reset(PINNED_NOW)

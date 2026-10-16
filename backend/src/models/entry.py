@@ -16,15 +16,18 @@ class EntryRow(Base):
     __tablename__ = 'entries'
     __table_args__ = (
         Index('ix_entries_date', 'date'),
+        Index('ix_entries_user_date', 'user_id', 'date'),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[str] = mapped_column(String(64), nullable=False, default='local', server_default='local')
     kind: Mapped[str] = mapped_column(String(16), nullable=False)
     title: Mapped[str] = mapped_column(Text, nullable=False)
     date: Mapped[datetime.date | None] = mapped_column(Date, nullable=True)
     time: Mapped[str | None] = mapped_column(String(5), nullable=True)
     timezone: Mapped[str] = mapped_column(String(64), nullable=False)
     duration_minutes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    recurrence: Mapped[str | None] = mapped_column(String(16), nullable=True)
     status: Mapped[str] = mapped_column(String(16), nullable=False, default='pending')
     created_at: Mapped[datetime.datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()

@@ -1,0 +1,306 @@
+"""Confirmations, past dates, undo, recurrence, conflicts and quick replies."""
+
+import datetime
+import unittest
+import uuid
+
+from src.ports.conversations import ConversationState
+from src.schemas.assistant import (AssistantIntent, AssistantStatus, ConversationMessage, Entry, EntryKind,
+                                   EntryStatus, Recurrence)
+from src.schemas.assistant_command import AssistantCommand
+from src.services import assistant as assistant_module
+from src.services.assistant import AssistantService
+from src.services.entries import EntryService
+from src.services.guards import find_shift, yes_no
+from src.services.recurrence import find_recurrence, occurrences
+from src.user_context import acting_as
+from tests.test_entry_flow import FakeExtractor, FakeRepository
+
+NOW = datetime.datetime(2026, 10, 16, 12, 0)
+TODAY = NOW.date()
+TZ = 'Europe/Moscow'
+
+
+class RecurringRepository(FakeRepository):
+    def create(self, *, kind, title, date, time, timezone, embedding, embedding_model,
+               duration_minutes=None, recurrence=None):
+        entry = super().create(kind=kind, title=title, date=date, time=time, timezone=timezone,
+                               embedding=embedding, embedding_model=embedding_model,
+                               duration_minutes=duration_minutes)
+        if recurrence is not None:
+            entry = entry.model_copy(update={'recurrence': recurrence})
+            self.items[-1] = entry
+        return entry
+
+    def create_once(self, *, kind, title, date, time, timezone, embedding, embedding_model,
+                    duration_minutes=None, recurrence=None):
+        for entry in self.items:
+            if (entry.kind == kind and entry.title.casefold() == title.casefold() and entry.date == date
+                    and entry.time == time and entry.status == EntryStatus.pending):
+                return entry, False
+        return self.create(kind=kind, title=title, date=date, time=time, timezone=timezone,
+                           embedding=embedding, embedding_model=embedding_model,
+                           duration_minutes=duration_minutes, recurrence=recurrence), True
+
+    def restore(self, entry):
+        self.items.append(entry)
+        return entry
+
+    def list_period(self, date_from, date_to, *, kind=None, status=None):
+        result = []
+        for entry in self.items:
+            if entry.date is None or (kind is not None and entry.kind != kind):
+                continue
+            for day in occurrences(entry.date, entry.recurrence, date_from, date_to):
+                result.append(entry.model_copy(update={'date': day}))
+        return result
+
+
+class Conversations:
+    """Keeps pending commands, messages and the undo record like the real repository."""
+
+    def __init__(self):
+        self.states = {}
+        self.undo = {}
+
+    def get(self, conversation_id):
+        return self.states.get(conversation_id)
+
+    def save_turn(self, turn, pending_command):
+        previous = self.states.get(turn.conversation_id)
+        messages = list(previous.messages) if previous else []
+        stamp = datetime.datetime.now(datetime.timezone.utc)
+        messages += [
+            ConversationMessage(id=uuid.uuid4(), role='user', text=turn.user_text, created_at=stamp),
+            ConversationMessage(id=uuid.uuid4(), role='assistant', text=turn.assistant_text, created_at=stamp),
+        ]
+        last = previous.last_entry_id if previous else None
+        if turn.status == AssistantStatus.completed and len(turn.entries) == 1:
+            last = turn.entries[0].id
+        self.states[turn.conversation_id] = ConversationState(
+            id=turn.conversation_id, pending_command=pending_command, messages=messages, last_entry_id=last)
+
+    def is_foreign(self, conversation_id):
+        return False
+
+    def get_undo(self, conversation_id):
+        return self.undo.get(conversation_id)
+
+    def set_undo(self, conversation_id, record):
+        self.undo[conversation_id] = record
+
+
+def command(**fields):
+    return AssistantCommand.model_validate(fields)
+
+
+class Chat:
+    def __init__(self, commands, repository=None):
+        self.repository = repository or RecurringRepository()
+        self.entries = EntryService(self.repository)
+        self.service = AssistantService(FakeExtractor(commands), self.entries, Conversations())
+        self.cid = None
+
+    def __call__(self, text):
+        turn = self.service.handle_message(text, TZ, self.cid)
+        self.cid = turn.conversation_id
+        return turn
+
+
+def setUpModule():
+    global TOKEN
+    TOKEN = assistant_module._now.set(NOW)
+
+
+def tearDownModule():
+    assistant_module._now.reset(TOKEN)
+
+
+class YesNoTests(unittest.TestCase):
+    def test_typos_and_layout(self):
+        for text, expected in [('да', 'yes'), ('жа', 'yes'), ('lf', 'yes'), ('Да!', 'yes'), ('ага', 'yes'),
+                               ('нет', 'no'), ('ytn', 'no'), ('неа', 'no'), ('давайй', 'yes'),
+                               ('на', None), ('но', None), ('завтра', None), ('удали встречу', None)]:
+            with self.subTest(text=text):
+                self.assertEqual(yes_no(text), expected)
+
+    def test_shift_words(self):
+        self.assertEqual(find_shift('Перенеси встречу на час позже'), 60)
+        self.assertEqual(find_shift('сдвинь её на 30 минут раньше'), -30)
+        self.assertEqual(find_shift('перенеси на полчаса позже'), 30)
+        self.assertEqual(find_shift('перенеси отчёт на 3 дня'), 3 * 1440)
+        self.assertIsNone(find_shift('перенеси на пятницу'))
+        self.assertIsNone(find_shift('встреча на час'))
+
+    def test_recurrence_words(self):
+        self.assertEqual(find_recurrence('Планёрка каждый понедельник в 10'), Recurrence.weekly)
+        self.assertEqual(find_recurrence('зарядка по будням'), Recurrence.weekdays)
+        self.assertEqual(find_recurrence('каждый день пить воду'), Recurrence.daily)
+        self.assertIsNone(find_recurrence('встреча в понедельник'))
+
+
+class PastDateTests(unittest.TestCase):
+    def test_yesterday_is_resolved_and_confirmed(self):
+        chat = Chat([command(action='create_entry', kind='task', title='купить хлеб')])
+        asked = chat('Поставь задачу на вчера купить хлеб')
+        self.assertEqual(asked.status, AssistantStatus.needs_clarification)
+        self.assertIn('Вчера — это 15 октября, этот день уже прошёл', asked.assistant_text)
+        self.assertEqual(asked.suggestions, ['Да', 'Нет'])
+        self.assertEqual(chat.repository.items, [])
+        done = chat('да')
+        self.assertEqual(done.status, AssistantStatus.completed)
+        self.assertEqual(done.entries[0].date, TODAY - datetime.timedelta(days=1))
+        self.assertEqual(done.entries[0].title, 'Купить хлеб')
+
+    def test_other_date_in_reply_replaces_past_one(self):
+        chat = Chat([command(action='create_entry', kind='task', title='купить хлеб')])
+        chat('Поставь задачу на позавчера купить хлеб')
+        moved = chat('нет, на завтра')
+        self.assertEqual(moved.status, AssistantStatus.completed)
+        self.assertEqual(moved.entries[0].date, TODAY + datetime.timedelta(days=1))
+
+    def test_no_cancels(self):
+        chat = Chat([command(action='create_entry', kind='task', title='купить хлеб')])
+        chat('Поставь задачу на вчера купить хлеб')
+        self.assertEqual(chat('нет').assistant_text, 'Хорошо, не ставлю.')
+        self.assertEqual(chat.repository.items, [])
+
+    def test_passed_time_today_is_confirmed(self):
+        chat = Chat([command(action='create_entry', kind='reminder', title='позвонить маме',
+                             date=TODAY.isoformat(), time='09:00', time_phrase='в 9:00')])
+        asked = chat('Напомни сегодня в 9:00 позвонить маме')
+        self.assertIn('Сегодня в 09:00 — это время уже прошло', asked.assistant_text)
+
+
+class ConfirmTests(unittest.TestCase):
+    def setUp(self):
+        self.chat = Chat([command(action='delete_entry', kind='meeting', target_query='встреча с командой')] * 5)
+        self.entry = self.chat.entries.create(kind=EntryKind.meeting, title='Встреча с командой',
+                                              date=TODAY + datetime.timedelta(days=1), time='10:00', timezone=TZ)
+
+    def test_delete_asks_and_accepts_typo(self):
+        asked = self.chat('Удали встречу с командой')
+        self.assertEqual(asked.status, AssistantStatus.needs_clarification)
+        self.assertIn('Удалить встречу «Встреча с командой», завтра с 10:00 до 11:00?', asked.assistant_text)
+        self.assertIsNotNone(self.chat.repository.get(self.entry.id))
+        done = self.chat('lf')
+        self.assertEqual(done.assistant_text, 'Удалил встречу «Встреча с командой».')
+        self.assertIsNone(self.chat.repository.get(self.entry.id))
+
+    def test_unclear_reply_keeps_question(self):
+        self.chat('Удали встречу с командой')
+        again = self.chat('ээ')
+        self.assertEqual(again.status, AssistantStatus.needs_clarification)
+        self.assertIn('Не понял ответ. Удалить встречу', again.assistant_text)
+        self.assertIn('Ответьте «да» или «нет»', again.assistant_text)
+        self.assertEqual(self.chat('да').status, AssistantStatus.completed)
+
+    def test_bare_yes_without_question(self):
+        self.assertIn('ничего не спрашивал', self.chat('да').assistant_text)
+
+
+class UndoTests(unittest.TestCase):
+    def test_undo_create_update_delete(self):
+        tomorrow = (TODAY + datetime.timedelta(days=1)).isoformat()
+        chat = Chat([
+            command(action='create_entry', kind='meeting', title='встреча с Иваном', date=tomorrow, time='15:00',
+                    date_phrase='завтра', time_phrase='в 15:00'),
+            command(action='create_entry', kind='meeting', title='встреча с Иваном', date=tomorrow, time='15:00',
+                    date_phrase='завтра', time_phrase='в 15:00'),
+            command(action='update_entry', time='16:00', time_phrase='на 16:00'),
+            command(action='delete_entry', target_query='встреча с Иваном'),
+        ])
+        created = chat('Поставь встречу с Иваном завтра в 15:00')
+        self.assertEqual(created.suggestions, ['Отмени последнее'])
+        self.assertIn('Отменил', chat('Отмени последнее').assistant_text)
+        self.assertEqual(chat.repository.items, [])
+        chat('Поставь встречу с Иваном завтра в 15:00')
+        moved = chat('Перенеси её на 16:00')
+        self.assertEqual(moved.entries[0].time, '16:00')
+        self.assertEqual(chat('Верни как было').entries[0].time, '15:00')
+        chat('Удали встречу с Иваном')
+        chat('да')
+        self.assertEqual(chat.repository.items, [])
+        back = chat('Отмени последнее')
+        self.assertEqual(back.entries[0].title, 'Встреча с Иваном')
+        self.assertIn('нечего', chat('Отмени последнее').assistant_text)
+
+
+class RecurrenceAndConflictTests(unittest.TestCase):
+    def test_weekly_entry_repeats_and_completion_moves_forward(self):
+        monday = TODAY + datetime.timedelta(days=(7 - TODAY.weekday()) % 7 or 7)
+        chat = Chat([
+            command(action='create_entry', kind='task', title='отчёт', date=monday.isoformat(),
+                    date_phrase='каждый понедельник'),
+            command(action='complete_entry', target_query='отчёт'),
+        ])
+        created = chat('Отчёт каждый понедельник')
+        self.assertEqual(created.entries[0].recurrence, Recurrence.weekly)
+        self.assertIn('каждую неделю', created.assistant_text)
+        listed = chat.entries.list_period(TODAY, TODAY + datetime.timedelta(days=20))
+        self.assertEqual(len(listed), 3)
+        done = chat('Отметь отчёт выполненным')
+        self.assertIn('Следующий раз', done.assistant_text)
+        self.assertEqual(done.entries[0].date, monday + datetime.timedelta(days=7))
+
+    def test_shift_beats_model_time(self):
+        tomorrow = TODAY + datetime.timedelta(days=1)
+        chat = Chat([
+            command(action='create_entry', kind='meeting', title='встреча с Петром', date=tomorrow.isoformat(),
+                    time='11:00', date_phrase='завтра', time_phrase='в 11:00'),
+            command(action='update_entry', time='14:00', time_phrase='на 2 дня'),
+        ])
+        chat('Поставь встречу с Петром завтра в 11:00')
+        moved = chat('Перенеси её на 2 дня')
+        self.assertEqual(moved.entries[0].date, tomorrow + datetime.timedelta(days=2))
+        self.assertEqual(moved.entries[0].time, '11:00')
+
+    def test_meeting_conflict_is_confirmed(self):
+        tomorrow = TODAY + datetime.timedelta(days=1)
+        chat = Chat([command(action='create_entry', kind='meeting', title='созвон', date=tomorrow.isoformat(),
+                             time='10:30', date_phrase='завтра', time_phrase='в 10:30')])
+        chat.entries.create(kind=EntryKind.meeting, title='Планёрка', date=tomorrow, time='10:00', timezone=TZ)
+        asked = chat('Поставь созвон завтра в 10:30')
+        self.assertIn('В это время уже есть встреча «Планёрка»', asked.assistant_text)
+        moved = chat('давай в 12')
+        self.assertEqual(moved.status, AssistantStatus.completed)
+        self.assertEqual(moved.entries[0].time, '12:00')
+
+    def test_done_report_completes_existing_task(self):
+        chat = Chat([command(action='unknown')])
+        task = chat.entries.create(kind=EntryKind.task, title='Купить молоко', date=None, time=None, timezone=TZ)
+        turn = chat('Я купил молоко')
+        self.assertEqual(turn.intent, AssistantIntent.complete_entry)
+        self.assertEqual(chat.repository.get(task.id).status, EntryStatus.completed)
+
+
+class UserIsolationTests(unittest.TestCase):
+    def test_context_user_is_used_by_default(self):
+        with acting_as('someone'):
+            from src.user_context import current_user
+            self.assertEqual(current_user(), 'someone')
+
+
+class UnsureClassifierTests(unittest.TestCase):
+    def test_ordinal_still_selects_when_model_is_unsure(self):
+        from src.schemas.dialogue import PendingReply, ReplyAct
+
+        class Unsure(FakeExtractor):
+            def classify_pending_reply(self, text, **kwargs):
+                return PendingReply(act=ReplyAct.unclear)
+
+        repository = RecurringRepository()
+        entries = EntryService(repository)
+        tomorrow = TODAY + datetime.timedelta(days=1)
+        first = entries.create(kind=EntryKind.meeting, title='Встреча с Сергеем', date=tomorrow, time='10:00',
+                               timezone=TZ)
+        second = entries.create(kind=EntryKind.meeting, title='Встреча с Сергеем', date=tomorrow, time='15:00',
+                                timezone=TZ)
+        service = AssistantService(Unsure(command(action='delete_entry', kind='meeting',
+                                                  target_query='Встреча с Сергеем')), entries, Conversations())
+        asked = service.handle_message('Удали встречу с Сергеем', TZ, None)
+        self.assertEqual(asked.suggestions, ['Первую', 'Вторую', 'Отмена'])
+        done = service.handle_message('вторую', TZ, asked.conversation_id)
+        self.assertEqual(done.status, AssistantStatus.completed)
+        self.assertIsNotNone(repository.get(first.id))
+        self.assertIsNone(repository.get(second.id))

@@ -139,7 +139,7 @@ class AssistantServiceTests(unittest.TestCase):
             set(AssistantCommand.provider_schema()['required']),
             set(AssistantCommand.model_fields) - {
                 'candidate_ids', 'selected_entry_id', 'move_intent', 'pending_step',
-                'signals_verified',
+                'signals_verified', 'recurrence', 'confirm', 'confirm_entry_id', 'forced', 'shift_minutes',
             },
         )
 
@@ -547,7 +547,7 @@ class AssistantServiceTests(unittest.TestCase):
         )
         self.assertEqual(second.status, AssistantStatus.completed)
         self.assertEqual(entries.created[0][1:4], (
-            'посмотреть фильм', expected_date, '18:00',
+            'Посмотреть фильм', expected_date, '18:00',
         ))
 
     def test_missing_title_is_not_filled_from_model_hallucination(self):
@@ -607,3 +607,19 @@ class AssistantServiceTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+PINNED_NOW = None
+
+
+def setUpModule():
+    """Pin «now» to 08:00 today so same-day times in fixtures are never in the past."""
+    global PINNED_NOW
+    import datetime as _dt
+    from src.services import assistant as _assistant
+    PINNED_NOW = _assistant._now.set(_dt.datetime.now().replace(hour=8, minute=0, second=0, microsecond=0))
+
+
+def tearDownModule():
+    from src.services import assistant as _assistant
+    _assistant._now.reset(PINNED_NOW)

@@ -254,7 +254,7 @@ class EntryFlowTests(unittest.TestCase):
                                          question.conversation_id)
         self.assertEqual(created.status, AssistantStatus.completed)
         self.assertEqual(created.entries[0].kind, EntryKind.task)
-        self.assertEqual(created.entries[0].title, 'купить молоко')
+        self.assertEqual(created.entries[0].title, 'Купить молоко')
         self.assertIsNone(created.entries[0].date)
         self.assertIsNone(conversations.get(question.conversation_id).pending_command)
 
@@ -373,7 +373,10 @@ class EntryFlowTests(unittest.TestCase):
         self.assertEqual(question.status, AssistantStatus.needs_clarification)
         self.assertIn('05:00 или 17:00', question.assistant_text)
         self.assertEqual(repository.items, [])
-        created = service.handle_message('утром', 'Europe/Moscow', question.conversation_id)
+        past = service.handle_message('утром', 'Europe/Moscow', question.conversation_id)
+        self.assertEqual(past.status, AssistantStatus.needs_clarification)
+        self.assertIn('время уже прошло', past.assistant_text)
+        created = service.handle_message('да', 'Europe/Moscow', question.conversation_id)
         self.assertEqual(created.status, AssistantStatus.completed)
         self.assertEqual(created.entries[0].time, '05:00')
 
@@ -447,7 +450,7 @@ class EntryFlowTests(unittest.TestCase):
                                       'Europe/Moscow', None)
         self.assertEqual(turn.status, AssistantStatus.completed)
         self.assertEqual(turn.intent, AssistantIntent.create_entry)
-        self.assertEqual(turn.entries[0].title, 'закончить проверочный отчёт')
+        self.assertEqual(turn.entries[0].title, 'Закончить проверочный отчёт')
 
     def test_explicit_delete_pronoun_overrides_wrong_update_intent(self):
         repository = FakeRepository()
@@ -458,7 +461,10 @@ class EntryFlowTests(unittest.TestCase):
             AssistantCommand.model_validate({'action': 'update_entry'}),
         ]), EntryService(repository), FakeConversations())
         created = service.handle_message('Создай задачу Проверочный отчёт', 'Europe/Moscow', None)
-        deleted = service.handle_message('Удали её', 'Europe/Moscow', created.conversation_id)
+        asked = service.handle_message('Удали её', 'Europe/Moscow', created.conversation_id)
+        self.assertEqual(asked.status, AssistantStatus.needs_clarification)
+        self.assertEqual(asked.suggestions, ['Да', 'Нет'])
+        deleted = service.handle_message('жа', 'Europe/Moscow', created.conversation_id)
         self.assertEqual(deleted.status, AssistantStatus.completed)
         self.assertEqual(deleted.intent, AssistantIntent.delete_entry)
         self.assertEqual(repository.items, [])
@@ -471,7 +477,7 @@ class EntryFlowTests(unittest.TestCase):
         })), EntryService(FakeRepository()), FakeConversations())
         turn = service.handle_message('Создай встречу с Иваном сегодня в 10:00', 'Europe/Moscow', None)
         self.assertEqual(turn.entries[0].duration_minutes, 60)
-        self.assertIn('10:00–11:00', turn.assistant_text)
+        self.assertIn('с 10:00 до 11:00', turn.assistant_text)
         self.assertIn('по умолчанию', turn.assistant_text)
 
     def test_meeting_move_keeps_or_changes_duration(self):
@@ -487,14 +493,14 @@ class EntryFlowTests(unittest.TestCase):
         created = service.handle_message('Создай встречу с Иваном сегодня в 10:00 на 30 минут',
                                         'Europe/Moscow', None)
         self.assertEqual(created.entries[0].duration_minutes, 30)
-        self.assertIn('10:00–10:30', created.assistant_text)
+        self.assertIn('с 10:00 до 10:30', created.assistant_text)
         moved = service.handle_message('А перенеси её на 12:00', 'Europe/Moscow', created.conversation_id)
         self.assertEqual(moved.entries[0].duration_minutes, 30)
-        self.assertIn('12:00–12:30', moved.assistant_text)
+        self.assertIn('с 12:00 до 12:30', moved.assistant_text)
         shortened = service.handle_message('А перенеси её на 13:00 и сократи до 20 минут',
                                            'Europe/Moscow', created.conversation_id)
         self.assertEqual(shortened.entries[0].duration_minutes, 20)
-        self.assertIn('13:00–13:20', shortened.assistant_text)
+        self.assertIn('с 13:00 до 13:20', shortened.assistant_text)
 
     def test_move_with_new_duration_waits_for_schedule(self):
         today = datetime.datetime.now(ZoneInfo('Europe/Moscow')).date()
@@ -608,7 +614,7 @@ class EntryFlowTests(unittest.TestCase):
         self.assertEqual(moved.entries[0].date,
                          datetime.datetime.now(ZoneInfo('Europe/Moscow')).date() + datetime.timedelta(days=1))
         self.assertEqual(moved.entries[0].time, '16:00')
-        self.assertIn('Перенесено', moved.assistant_text)
+        self.assertIn('теперь', moved.assistant_text)
         self.assertIsNone(conversations.get(created.conversation_id).pending_command)
 
     def test_ambiguous_move_selects_meeting_then_asks_for_new_schedule(self):
@@ -880,7 +886,7 @@ class EntryFlowTests(unittest.TestCase):
         created = service.handle_message('Мне нужно купить молоко', 'Europe/Moscow',
                                          question.conversation_id)
         self.assertEqual(created.status, AssistantStatus.completed)
-        self.assertEqual(created.entries[0].title, 'купить молоко')
+        self.assertEqual(created.entries[0].title, 'Купить молоко')
         self.assertIsNotNone(repository.get(old.id))
 
     def test_unclear_reply_with_new_reminder_does_not_reuse_pending_title(self):
@@ -900,7 +906,7 @@ class EntryFlowTests(unittest.TestCase):
         created = service.handle_message('Напомни завтра в 18:00 купить лекарства',
                                          'Europe/Moscow', question.conversation_id)
         self.assertEqual(created.status, AssistantStatus.completed)
-        self.assertEqual(created.entries[0].title, 'купить лекарства')
+        self.assertEqual(created.entries[0].title, 'Купить лекарства')
         self.assertEqual(len(repository.items), 1)
         self.assertIsNone(conversations.get(created.conversation_id).pending_command)
 
@@ -998,8 +1004,9 @@ class EntryFlowTests(unittest.TestCase):
         ]), entries, FakeConversations())
         created = service.handle_message('Создай задачу Проверочный отчёт А',
                                          'Europe/Moscow', None)
-        deleted = service.handle_message('Удали эту задачу Проверочный отчёт Б',
-                                         'Europe/Moscow', created.conversation_id)
+        service.handle_message('Удали эту задачу Проверочный отчёт Б',
+                               'Europe/Moscow', created.conversation_id)
+        deleted = service.handle_message('да', 'Europe/Moscow', created.conversation_id)
         self.assertEqual(deleted.status, AssistantStatus.completed)
         self.assertIsNotNone(repository.get(created.entries[0].id))
         self.assertIsNone(repository.get(other.id))
@@ -1272,3 +1279,19 @@ class EntryFlowTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+PINNED_NOW = None
+
+
+def setUpModule():
+    """Pin «now» to 08:00 today so same-day times in fixtures are never in the past."""
+    global PINNED_NOW
+    import datetime as _dt
+    from src.services import assistant as _assistant
+    PINNED_NOW = _assistant._now.set(_dt.datetime.now().replace(hour=8, minute=0, second=0, microsecond=0))
+
+
+def tearDownModule():
+    from src.services import assistant as _assistant
+    _assistant._now.reset(PINNED_NOW)

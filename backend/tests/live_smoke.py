@@ -5,6 +5,7 @@ Usage: python tests/live_smoke.py [base_url]
 
 import datetime
 import json
+import http.cookiejar
 import sys
 import time
 import urllib.error
@@ -15,16 +16,19 @@ import uuid
 BASE = (sys.argv[1] if len(sys.argv) > 1 else 'http://127.0.0.1:8000').rstrip('/')
 TIMEZONE = 'Europe/Moscow'
 created_ids = set()
+# One browser = one user: keep the session cookie and send the CSRF header.
+opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
 
 
 def request(method, path, body=None):
     data = json.dumps(body, ensure_ascii=False).encode() if body is not None else None
     req = urllib.request.Request(
         BASE + path, data=data, method=method,
-        headers={'Content-Type': 'application/json'} if data else {},
+        headers={'X-Requested-With': 'assistant',
+                 **({'Content-Type': 'application/json'} if data else {})},
     )
     try:
-        with urllib.request.urlopen(req, timeout=150) as response:
+        with opener.open(req, timeout=150) as response:
             raw = response.read()
             return response.status, json.loads(raw) if raw else None
     except urllib.error.HTTPError as exc:
@@ -46,7 +50,7 @@ def message(text, conversation_id=None, request_id=None):
     if status != 200:
         raise AssertionError(f'{text!r}: HTTP {status}: {turn}')
     if (turn['intent'] == 'create_entry' and turn['status'] == 'completed'
-            and turn['assistant_text'].startswith('Сохранено:')):
+            and turn['assistant_text'].startswith('Готово, создал')):
         created_ids.update(entry['id'] for entry in turn['entries'])
     print(json.dumps({
         'text': text, 'status': turn['status'], 'intent': turn['intent'],

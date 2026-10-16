@@ -6,7 +6,7 @@ import uuid
 
 import pydantic
 
-from src.schemas.assistant import AssistantIntent, EntryKind
+from src.schemas.assistant import AssistantIntent, EntryKind, Recurrence
 from src.schemas.dialogue import PendingStep
 
 
@@ -48,6 +48,12 @@ class AssistantCommand(pydantic.BaseModel):
     move_intent: bool | None = None
     pending_step: PendingStep | None = None
     signals_verified: bool = False
+    # Server-owned: recurrence comes from the user's words, confirmations from guards.
+    recurrence: Recurrence | None = None
+    confirm: str | None = None
+    confirm_entry_id: uuid.UUID | None = None
+    forced: list[str] | None = None
+    shift_minutes: int | None = None
 
     @pydantic.field_validator('title', 'query', 'date_phrase', 'time_phrase',
                              'duration_phrase', 'target_query', 'target_date_phrase',
@@ -89,7 +95,8 @@ class AssistantCommand(pydantic.BaseModel):
         """Require explicit nulls so the model cannot silently omit fields."""
         schema = cls.model_json_schema()
         for name in ('candidate_ids', 'selected_entry_id', 'move_intent',
-                     'pending_step', 'signals_verified'):
+                     'pending_step', 'signals_verified', 'recurrence', 'confirm',
+                     'confirm_entry_id', 'forced', 'shift_minutes'):
             schema['properties'].pop(name)
         schema['required'] = list(schema['properties'])
         return schema

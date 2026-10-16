@@ -4,10 +4,8 @@ info:
   version: 0.1.0
   description: |
     Контракт прототипа для фронтенда. Ручки с x-implementation-status: implemented
-    уже работают; partial доступны в API и при настроенном GigaChat выполняют
-    создание, список и поиск записей, включая уточняющий диалог.
-    Без ключа GigaChat маршруты ассистента отвечают 501; planned описывают
-    следующий этап.
+    работают; planned — ещё нет. Маршруты ассистента требуют ключ GigaChat
+    (без него отвечают 501) и PostgreSQL.
     x-requirement-level: core отмечает публичные ручки минимального сценария,
     supporting — полезные технические и прямые ручки для фронтенда, additional —
     дополнительный функционал. Действия списка и поиска обязательны внутри
@@ -16,7 +14,13 @@ info:
     один запрос с аудиофайлом, распознавание и обработка команды на сервере.
     Текстовый маршрут — POST /v1/assistant/messages. Оба возвращают AssistantTurn.
     POST /transcribe только возвращает текст и не выполняет команду.
-    Пока предполагается один пользователь без авторизации.
+    Пользователи различаются по подписанной HttpOnly-куке sa_session, которую
+    сервер выдаёт сам (без логина и пароля). Запросы POST/PATCH/DELETE с этой
+    кукой должны содержать заголовок X-Requested-With: assistant (защита от CSRF).
+    Если на сервере задан ACCESS_CODE, перед работой нужен POST /v1/session/unlock.
+    Каждый запрос к ассистенту фронтенд отправляет с новым request_id (UUID). При повторе
+    после тайм-аута используется тот же request_id: сервер вернёт сохранённый ответ и не
+    выполнит действие второй раз; тот же ID с другим содержимым даёт 409.
 servers:
   - url: http://localhost:8000
     description: Локальный backend
@@ -27,7 +31,160 @@ tags:
   - name: Entries
   - name: Conversations
   - name: Speech synthesis
+  - name: Session
+  - name: Calendar
 paths:
+  /v1/session:
+    get:
+      tags: [Session]
+      operationId: getSession
+      summary: Узнать текущую сессию и нужен ли код доступа
+      x-implementation-status: implemented
+      x-requirement-level: additional
+      responses:
+        '200':
+          description: Сессия браузера
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SessionInfo'
+  /v1/session/unlock:
+    post:
+      tags: [Session]
+      operationId: unlockSession
+      summary: Ввести код доступа (если на сервере задан ACCESS_CODE)
+      x-implementation-status: implemented
+      x-requirement-level: additional
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [code]
+              properties:
+                code:
+                  type: string
+                  minLength: 1
+      responses:
+        '204':
+          description: Код принят, кука обновлена
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+  /v1/entries/undated:
+    get:
+      tags: [Entries]
+      operationId: listUndatedEntries
+      summary: Получить задачи без срока
+      x-implementation-status: implemented
+      x-requirement-level: additional
+      responses:
+        '200':
+          description: Записи без даты, невыполненные первыми
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EntryList'
+  /v1/calendar:
+    get:
+      tags: [Calendar]
+      operationId: getCalendarLink
+      summary: Получить ссылку на календарь в формате iCalendar
+      description: Ссылку можно добавить в Google, Apple или Outlook Calendar как подписку.
+      x-implementation-status: implemented
+      x-requirement-level: additional
+      responses:
+        '200':
+          description: Персональная ссылка
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [url]
+                properties:
+                  url:
+                    type: string
+  /v1/calendar/feed/{token}.ics:
+    get:
+      tags: [Calendar]
+      operationId: getCalendarFeed
+      summary: Календарь пользователя (iCalendar)
+      description: Доступ по токену из ссылки, кука не нужна.
+      x-implementation-status: implemented
+      x-requirement-level: additional
+      parameters:
+        - name: token
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Файл iCalendar
+          content:
+            text/calendar:
+              schema:
+                type: string
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /v1/calendar/rotate:
+    post:
+      tags: [Calendar]
+      operationId: rotateCalendarLink
+      summary: Выпустить новую ссылку на календарь
+      description: Старая ссылка перестаёт работать. Нужна, если ссылка попала не в те руки.
+      x-implementation-status: implemented
+      x-requirement-level: additional
+      responses:
+        '200':
+          description: Новая ссылка
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [url]
+                properties:
+                  url:
+                    type: string
+  /v1/assistant/summary:
+    get:
+      tags: [Assistant]
+      operationId: getDailySummary
+      summary: Сводка на сегодня
+      description: Записи на сегодня и число невыполненных с прошлых дней.
+      x-implementation-status: implemented
+      x-requirement-level: additional
+      parameters:
+        - name: timezone
+          in: query
+          required: true
+          schema:
+            type: string
+            example: Europe/Moscow
+      responses:
+        '200':
+          description: Текст сводки и записи
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DailySummary'
+  /v1/status:
+    get:
+      tags: [System]
+      operationId: getServicesStatus
+      summary: Состояние сервисов
+      description: Что сейчас работает — понимание команд (GigaChat), распознавание, озвучка, Google Календарь.
+      x-implementation-status: implemented
+      x-requirement-level: additional
+      responses:
+        '200':
+          description: Список сервисов
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ServicesStatus'
   /health:
     get:
       tags: [System]
@@ -107,15 +264,10 @@ paths:
       summary: Отправить текстовый запрос ассистенту
       description: |
         Основной маршрут текстовой кнопки. Ассистент определяет намерение,
-        через GigaChat извлекает структурированную команду и возвращает ответ.
-        При подключённой БД создание, список, поиск, изменение и удаление
-        возвращают status = completed.
-        При нехватке данных ответ имеет status = needs_clarification. Следующий
-        ответ пользователя отправляется с тем же conversation_id; история и
-        незавершённая команда сохраняются на сервере. При неоднозначном выборе
-        записи ответ содержит варианты в entries; следующий ответ может быть
-        «вторую» или «ту, что в 16:00».
-      x-implementation-status: partial
+        при необходимости сохраняет или ищет записи и возвращает ответ.
+        Если не хватает данных, status = needs_clarification; следующий ответ
+        пользователя отправляется с тем же conversation_id.
+      x-implementation-status: implemented
       x-requirement-level: core
       requestBody:
         required: true
@@ -144,6 +296,8 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '409':
           description: request_id использован с другим содержимым
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
         '501':
           $ref: '#/components/responses/NotImplemented'
         '502':
@@ -158,7 +312,7 @@ paths:
         одним multipart-запросом. Сервер распознаёт речь, передаёт полученный текст
         в ту же логику ассистента, что использует POST /v1/assistant/messages,
         и возвращает AssistantTurn с распознанным текстом в user_text.
-      x-implementation-status: partial
+      x-implementation-status: implemented
       x-requirement-level: core
       requestBody:
         required: true
@@ -197,6 +351,8 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '409':
           description: request_id использован с другим содержимым
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
         '501':
           $ref: '#/components/responses/NotImplemented'
         '502':
@@ -273,7 +429,7 @@ paths:
       description: |
         Используется формой фронтенда. Для встречи и напоминания обязательны date
         и time; для задачи они могут отсутствовать. Голосовой сценарий идёт через Assistant.
-      x-implementation-status: planned
+      x-implementation-status: implemented
       x-requirement-level: additional
       requestBody:
         required: true
@@ -378,12 +534,32 @@ paths:
           description: Запись удалена
         '404':
           $ref: '#/components/responses/NotFound'
+  /v1/speech/voices:
+    get:
+      tags: [Speech synthesis]
+      operationId: listVoices
+      summary: Голоса для озвучки ответов
+      description: |
+        Голоса Silero TTS (русская модель, работает на процессоре).
+        Пока модель загружается после старта сервера, loading = true.
+      x-implementation-status: implemented
+      x-requirement-level: additional
+      responses:
+        '200':
+          description: Список голосов
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VoiceList'
   /v1/speech/synthesize:
     post:
       tags: [Speech synthesis]
       operationId: synthesizeSpeech
-      summary: Озвучить текст ответа ассистента
-      x-implementation-status: planned
+      summary: Озвучить текст ответа ассистента выбранным голосом
+      description: |
+        Даты, время и числа перед синтезом переводятся в слова. Ответ — WAV 24 кГц.
+        Если озвучка отключена или ещё загружается — 503, фронтенд читает ответ голосом браузера.
+      x-implementation-status: implemented
       x-requirement-level: additional
       requestBody:
         required: true
@@ -396,17 +572,30 @@ paths:
                 text:
                   type: string
                   minLength: 1
+                  maxLength: 1000
                   example: Напоминание на завтра, 10:00, создано.
+                voice:
+                  type: string
+                  default: alina
+                  example: alina
       responses:
         '200':
           description: Аудио с ответом
           content:
-            audio/mpeg:
+            audio/wav:
               schema:
                 type: string
                 format: binary
+        '404':
+          $ref: '#/components/responses/NotFound'
         '422':
           $ref: '#/components/responses/ValidationError'
+        '503':
+          description: Озвучка отключена или ещё загружается
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
 components:
   parameters:
     ConversationId:
@@ -442,6 +631,18 @@ components:
         application/json:
           schema:
             $ref: '#/components/schemas/ErrorResponse'
+    Unauthorized:
+      description: Нужен или неверен код доступа
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    TooManyRequests:
+      description: Превышен лимит запросов
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
     InternalError:
       description: Не удалось выполнить операцию
       content:
@@ -449,7 +650,7 @@ components:
           schema:
             $ref: '#/components/schemas/ErrorResponse'
     NotImplemented:
-      description: Обработка команд ассистента пока не подключена
+      description: Обработка команд ассистента не подключена (нет ключа GigaChat)
       content:
         application/json:
           schema:
@@ -461,6 +662,121 @@ components:
           schema:
             $ref: '#/components/schemas/ErrorResponse'
   schemas:
+    ErrorResponse:
+      type: object
+      required: [detail]
+      properties:
+        detail:
+          type: string
+    HealthResponse:
+      type: object
+      required: [status, model, device]
+      properties:
+        status:
+          type: string
+          enum: [ok]
+        model:
+          type: string
+          example: v3_e2e_rnnt
+        device:
+          type: string
+          example: 'cuda:0'
+    TranscriptionResponse:
+      type: object
+      required: [text]
+      properties:
+        text:
+          type: string
+          example: Напомни мне завтра позвонить Ивану
+    LongformTranscriptionResponse:
+      type: object
+      required: [segments]
+      properties:
+        segments:
+          type: array
+          items:
+            $ref: '#/components/schemas/TranscriptionSegment'
+    TranscriptionSegment:
+      type: object
+      required: [start, end, text]
+      properties:
+        start:
+          type: number
+          format: float
+          minimum: 0
+          description: Начало сегмента в секундах.
+        end:
+          type: number
+          format: float
+          minimum: 0
+          description: Конец сегмента в секундах.
+        text:
+          type: string
+    TextMessageRequest:
+      type: object
+      required: [text, timezone]
+      properties:
+        text:
+          type: string
+          minLength: 1
+          maxLength: 1000
+          example: Что у меня сегодня?
+        timezone:
+          type: string
+          description: Часовой пояс IANA для слов «сегодня» и «завтра».
+          example: Europe/Moscow
+        conversation_id:
+          type: string
+          format: uuid
+          description: Передать для продолжения диалога; при новом диалоге опустить.
+        request_id:
+          type: string
+          format: uuid
+          description: Один и тот же ID при повторе того же текстового запроса.
+    AssistantTurn:
+      type: object
+      required: [conversation_id, turn_id, user_text, assistant_text, status, intent, entries]
+      properties:
+        conversation_id:
+          type: string
+          format: uuid
+        turn_id:
+          type: string
+          format: uuid
+        request_id:
+          type: string
+          format: uuid
+          nullable: true
+        user_text:
+          type: string
+          description: Исходный текст или результат распознавания речи.
+        assistant_text:
+          type: string
+          description: Ответ пользователю, включая уточняющий вопрос.
+        status:
+          type: string
+          enum: [completed, needs_clarification, no_action]
+        intent:
+          type: string
+          enum: [create_entry, list_entries, search_entries, update_entry, delete_entry, complete_entry, unknown]
+        entries:
+          type: array
+          description: Созданные или найденные записи; пустой список при уточнении.
+          items:
+            $ref: '#/components/schemas/Entry'
+        suggestions:
+          type: array
+          description: Короткие ответы для кнопок под сообщением («Да», «Нет», «Отмени последнее»).
+          items:
+            type: string
+      example:
+        conversation_id: 550e8400-e29b-41d4-a716-446655440000
+        turn_id: 4e8d4cb6-bf66-453c-a92b-71c578889103
+        user_text: Поставь встречу с Иваном завтра
+        assistant_text: На какое время поставить встречу?
+        status: needs_clarification
+        intent: create_entry
+        entries: []
     AssistantCommand:
       type: object
       additionalProperties: false
@@ -543,115 +859,6 @@ components:
         new_title:
           type: string
           nullable: true
-    ErrorResponse:
-      type: object
-      required: [detail]
-      properties:
-        detail:
-          type: string
-    HealthResponse:
-      type: object
-      required: [status, model, device]
-      properties:
-        status:
-          type: string
-          enum: [ok]
-        model:
-          type: string
-          example: v3_e2e_rnnt
-        device:
-          type: string
-          example: 'cuda:0'
-    TranscriptionResponse:
-      type: object
-      required: [text]
-      properties:
-        text:
-          type: string
-          example: Напомни мне завтра позвонить Ивану
-    LongformTranscriptionResponse:
-      type: object
-      required: [segments]
-      properties:
-        segments:
-          type: array
-          items:
-            $ref: '#/components/schemas/TranscriptionSegment'
-    TranscriptionSegment:
-      type: object
-      required: [start, end, text]
-      properties:
-        start:
-          type: number
-          format: float
-          minimum: 0
-          description: Начало сегмента в секундах.
-        end:
-          type: number
-          format: float
-          minimum: 0
-          description: Конец сегмента в секундах.
-        text:
-          type: string
-    TextMessageRequest:
-      type: object
-      required: [text, timezone]
-      properties:
-        text:
-          type: string
-          minLength: 1
-          example: Что у меня сегодня?
-        timezone:
-          type: string
-          description: Часовой пояс IANA для слов «сегодня» и «завтра».
-          example: Europe/Moscow
-        conversation_id:
-          type: string
-          format: uuid
-          description: Передать для продолжения диалога; при новом диалоге опустить.
-        request_id:
-          type: string
-          format: uuid
-          description: Один и тот же ID при повторе того же текстового запроса.
-    AssistantTurn:
-      type: object
-      required: [conversation_id, turn_id, user_text, assistant_text, status, intent, entries]
-      properties:
-        conversation_id:
-          type: string
-          format: uuid
-        turn_id:
-          type: string
-          format: uuid
-        request_id:
-          type: string
-          format: uuid
-          nullable: true
-        user_text:
-          type: string
-          description: Исходный текст или результат распознавания речи.
-        assistant_text:
-          type: string
-          description: Ответ пользователю, включая уточняющий вопрос.
-        status:
-          type: string
-          enum: [completed, needs_clarification, no_action]
-        intent:
-          type: string
-          enum: [create_entry, list_entries, search_entries, complete_entry, update_entry, delete_entry, unknown]
-        entries:
-          type: array
-          description: Созданные, найденные или изменённые записи; при выборе цели содержит варианты.
-          items:
-            $ref: '#/components/schemas/Entry'
-      example:
-        conversation_id: 550e8400-e29b-41d4-a716-446655440000
-        turn_id: 4e8d4cb6-bf66-453c-a92b-71c578889103
-        user_text: Поставь встречу с Иваном завтра в 15:00
-        assistant_text: 'Сохранено: Встреча с Иваном.'
-        status: completed
-        intent: create_entry
-        entries: []
     ConversationMessage:
       type: object
       required: [id, role, text, created_at]
@@ -673,6 +880,85 @@ components:
     EntryStatus:
       type: string
       enum: [pending, completed, cancelled]
+    Recurrence:
+      type: string
+      nullable: true
+      enum: [daily, weekdays, weekly, monthly, null]
+      description: Повтор записи; null — разовая.
+    VoiceInfo:
+      type: object
+      required: [id, name, description]
+      properties:
+        id:
+          type: string
+          example: alina
+        name:
+          type: string
+          example: Алина
+        description:
+          type: string
+          example: мужской голос
+    DailySummary:
+      type: object
+      required: [assistant_text, entries]
+      properties:
+        assistant_text:
+          type: string
+        entries:
+          type: array
+          items:
+            $ref: '#/components/schemas/Entry'
+    ServiceState:
+      type: object
+      required: [name, state, detail]
+      properties:
+        name:
+          type: string
+          example: Понимание команд
+        state:
+          type: string
+          enum: [ok, loading, error, off]
+        detail:
+          type: string
+    ServicesStatus:
+      type: object
+      required: [services]
+      properties:
+        services:
+          type: array
+          items:
+            $ref: '#/components/schemas/ServiceState'
+    VoiceList:
+      type: object
+      required: [available, loading, voices]
+      properties:
+        available:
+          type: boolean
+        loading:
+          type: boolean
+        voices:
+          type: array
+          items:
+            $ref: '#/components/schemas/VoiceInfo'
+    SessionInfo:
+      type: object
+      required: [user_id, access_code_required, unlocked, llm_provider, asr_enabled, voice_enabled]
+      properties:
+        user_id:
+          type: string
+          format: uuid
+        access_code_required:
+          type: boolean
+        unlocked:
+          type: boolean
+        llm_provider:
+          type: string
+          example: gigachat
+        asr_enabled:
+          type: boolean
+        voice_enabled:
+          type: boolean
+          description: false — сервер запущен без голоса (VOICE_ENABLED=false), только текст
     Entry:
       type: object
       description: Статус выполнения и дата изменения не обязательны для MVP.
@@ -702,9 +988,10 @@ components:
         duration_minutes:
           type: integer
           minimum: 1
-          maximum: 1440
           nullable: true
-          description: Длительность встречи; по умолчанию 60 минут. Для остальных типов null.
+          description: Длительность встречи; для остальных типов null.
+        recurrence:
+          $ref: '#/components/schemas/Recurrence'
         status:
           $ref: '#/components/schemas/EntryStatus'
         created_at:
@@ -738,8 +1025,9 @@ components:
         duration_minutes:
           type: integer
           minimum: 1
-          maximum: 1440
           nullable: true
+        recurrence:
+          $ref: '#/components/schemas/Recurrence'
     EntryUpdate:
       type: object
       minProperties: 1
@@ -760,8 +1048,9 @@ components:
         duration_minutes:
           type: integer
           minimum: 1
-          maximum: 1440
           nullable: true
+        recurrence:
+          $ref: '#/components/schemas/Recurrence'
         status:
           $ref: '#/components/schemas/EntryStatus'
     EntryList:

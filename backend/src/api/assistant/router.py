@@ -8,12 +8,16 @@ import src.ports.assistant
 import src.schemas.assistant
 import src.services.transcriber
 from src.api.transcribe.router import get_transcription_service
+from src.user_context import current_user
 
 
 router = fastapi.APIRouter(prefix='/v1/assistant', tags=['Assistant'])
 
 
 def get_assistant_service(request: fastapi.Request) -> src.ports.assistant.AssistantService:
+    limiter = getattr(request.app.state, 'assistant_limiter', None)
+    if limiter is not None and not limiter.allow(current_user()):
+        raise fastapi.HTTPException(status_code=429, detail='Слишком много запросов, подождите минуту')
     service = request.app.state.assistant_service
     if service is None:
         raise fastapi.HTTPException(

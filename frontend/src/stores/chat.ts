@@ -1,8 +1,9 @@
 import { defineStore } from 'pinia'
-import { computed, ref, watch } from 'vue'
-import { sendAudioMessage, sendTextMessage } from '@/api/client'
+import { ref, watch } from 'vue'
+import { getDailySummary, sendAudioMessage, sendTextMessage } from '@/api/client'
 import type { AssistantTurn, Entry } from '@/api/types'
-import { timezone } from '@/utils/time'
+import { speak, stopSpeech } from '@/composables/useSpeech'
+import { isoDate, timezone } from '@/utils/time'
 import { useEntriesStore } from './entries'
 
 export interface ChatMessage {
@@ -13,14 +14,18 @@ export interface ChatMessage {
   entries?: Entry[]
   pending?: boolean
   voice?: boolean
+  suggestions?: string[]
 }
 
-const STORAGE_KEY = 'assistant-chat-v1'
+const SUMMARY_KEY = 'assistant-summary-day'
+
+const STORAGE_KEY = 'assistant-chat-v2'
 const MAX_STORED = 100
 
 interface Persisted {
   messages: ChatMessage[]
   conversationId: string | null
+  awaiting: boolean
 }
 
 function load(): Persisted {
@@ -28,10 +33,16 @@ function load(): Persisted {
     const raw = localStorage.getItem(STORAGE_KEY) ?? sessionStorage.getItem(STORAGE_KEY)
     if (raw) {
       const p = JSON.parse(raw) as Persisted
-      if (Array.isArray(p.messages)) return { messages: p.messages.map((m) => ({ ...m, pending: false })), conversationId: p.conversationId ?? null }
+      if (Array.isArray(p.messages)) {
+        return {
+          messages: p.messages.map((m) => ({ ...m, pending: false })),
+          conversationId: p.conversationId ?? null,
+          awaiting: !!p.awaiting,
+        }
+      }
     }
   } catch {}
-  return { messages: [], conversationId: null }
+  return { messages: [], conversationId: null, awaiting: false }
 }
 
 let seq = 0
@@ -42,17 +53,18 @@ export const useChatStore = defineStore('chat', () => {
   const messages = ref<ChatMessage[]>(initial.messages)
   const sending = ref(false)
   const conversationId = ref<string | null>(initial.conversationId)
-  const awaitingClarification = computed(() => {
-    const lastAssistant = [...messages.value].reverse().find((message) => message.role === 'assistant')
-    return lastAssistant?.status === 'needs_clarification'
-  })
+  const awaiting = ref(initial.awaiting)
   const retryLast = ref<(() => void) | null>(null)
 
   watch(
-    [messages, conversationId],
+    [messages, conversationId, awaiting],
     () => {
       try {
-        const data: Persisted = { messages: messages.value.slice(-MAX_STORED), conversationId: conversationId.value }
+        const data: Persisted = {
+          messages: messages.value.slice(-MAX_STORED),
+          conversationId: conversationId.value,
+          awaiting: awaiting.value,
+        }
         localStorage.setItem(STORAGE_KEY, JSON.stringify(data))
       } catch {}
     },
@@ -66,8 +78,8 @@ export const useChatStore = defineStore('chat', () => {
     originalConversationId?: string | null,
   ) {
     const userId = previousUserId ?? localId()
-    const requestConversationId = originalConversationId === undefined
-      ? conversationId.value : originalConversationId
+    const requestConversationId = originalConversationId === undefined ? conversationId.value : originalConversationId
+    stopSpeech()
     if (!previousUserId) messages.value.push({ id: userId, role: 'user', ...user, pending: !!user.voice })
     else {
       messages.value = messages.value.filter((message) => message.role !== 'error')
@@ -85,12 +97,15 @@ export const useChatStore = defineStore('chat', () => {
         m.pending = false
       }
       conversationId.value = turn.conversation_id
+      awaiting.value = turn.status === 'needs_clarification'
+      speak(turn.assistant_text)
       messages.value.push({
         id: turn.turn_id,
         role: 'assistant',
         text: turn.assistant_text,
         status: turn.status,
         entries: turn.entries,
+        suggestions: turn.suggestions ?? [],
       })
     } catch (e) {
       const m = messages.value.find((x) => x.id === userId)
@@ -99,10 +114,12 @@ export const useChatStore = defineStore('chat', () => {
         if (m.voice) m.text = 'Голосовое сообщение (не отправлено)'
       }
       messages.value.push({ id: localId(), role: 'error', text: e instanceof Error ? e.message : 'Неизвестная ошибка' })
-      retryLast.value = () => { void run(user, call, userId, requestConversationId) }
+      retryLast.value = () => {
+        void run(user, call, userId, requestConversationId)
+      }
     } finally {
       sending.value = false
-      void useEntriesStore().refresh()
+      void useEntriesStore().refresh(true)
     }
   }
 
@@ -110,9 +127,7 @@ export const useChatStore = defineStore('chat', () => {
     const t = text.trim()
     if (!t || sending.value) return
     const request_id = crypto.randomUUID()
-    return run({ text: t }, (conversation_id) => sendTextMessage({
-      text: t, timezone, conversation_id, request_id,
-    }))
+    return run({ text: t }, (conversation_id) => sendTextMessage({ text: t, timezone, conversation_id, request_id }))
   }
 
   function sendAudio(file: Blob, filename: string) {
@@ -124,6 +139,26 @@ export const useChatStore = defineStore('chat', () => {
     )
   }
 
+  async function showDailySummary() {
+    const day = isoDate(new Date())
+    try {
+      if (localStorage.getItem(SUMMARY_KEY) === day) return
+    } catch {}
+    try {
+      const summary = await getDailySummary(timezone)
+      messages.value.push({
+        id: localId(),
+        role: 'assistant',
+        text: summary.assistant_text,
+        status: 'completed',
+        entries: summary.entries,
+      })
+      try {
+        localStorage.setItem(SUMMARY_KEY, day)
+      } catch {}
+    } catch {}
+  }
+
   function retry() {
     const fn = retryLast.value
     retryLast.value = null
@@ -133,8 +168,9 @@ export const useChatStore = defineStore('chat', () => {
   function reset() {
     messages.value = []
     conversationId.value = null
+    awaiting.value = false
     retryLast.value = null
   }
 
-  return { messages, sending, conversationId, awaitingClarification, retryLast, sendText, sendAudio, retry, reset }
+  return { messages, sending, conversationId, awaiting, retryLast, sendText, sendAudio, retry, reset, showDailySummary }
 })

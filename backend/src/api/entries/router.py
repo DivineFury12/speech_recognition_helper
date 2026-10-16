@@ -5,7 +5,7 @@ import uuid
 
 import fastapi
 
-from src.schemas.assistant import Entry, EntryKind, EntryList, EntryStatus, EntryUpdate
+from src.schemas.assistant import Entry, EntryCreate, EntryKind, EntryList, EntryStatus, EntryUpdate
 from src.services.entries import EntryService
 
 
@@ -33,6 +33,17 @@ def list_entries(
         date_from, date_to, kind=kind, status=status,
     )
     return EntryList(items=entries)
+
+
+@router.post('', operation_id='createEntry', response_model=Entry, status_code=201)
+def create_entry(body: EntryCreate, request: fastapi.Request) -> Entry:
+    try:
+        return get_entries_service(request).create(
+            kind=body.kind, title=' '.join(body.title.split()), date=body.date, time=body.time,
+            timezone=body.timezone, duration_minutes=body.duration_minutes, recurrence=body.recurrence,
+        )
+    except ValueError as exc:
+        raise fastapi.HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @router.get('/search', operation_id='searchEntries', response_model=EntryList)

@@ -9,7 +9,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from src.ports.embeddings import EmbeddingModel, EmbeddingUnavailableError
 from src.ports.entries import EntryRepository
-from src.schemas.assistant import Entry, EntryKind, EntryStatus, EntryUpdate
+from src.schemas.assistant import Entry, EntryKind, EntryStatus, EntryUpdate, Recurrence
 
 
 logger = logging.getLogger(__name__)
@@ -62,6 +62,15 @@ class EntryService:
     def get(self, entry_id: uuid.UUID) -> Entry | None:
         return self._repository.get(entry_id)
 
+    def all_entries(self) -> list[Entry]:
+        return self._repository.all_entries()
+
+    def list_undated(self) -> list[Entry]:
+        return self._repository.list_undated()
+
+    def restore(self, entry: Entry) -> Entry:
+        return self._repository.restore(entry)
+
     def update(self, entry_id: uuid.UUID, patch: EntryUpdate) -> Entry | None:
         existing = self.get(entry_id)
         if existing is None:
@@ -76,6 +85,8 @@ class EntryService:
         time = changes.get('time', existing.time)
         if time is not None and date is None:
             raise ValueError('Время требует даты')
+        if changes.get('recurrence', existing.recurrence) is not None and date is None:
+            raise ValueError('Для повторяющейся записи нужна дата')
         if existing.kind in (EntryKind.meeting, EntryKind.reminder) and (date is None or time is None):
             raise ValueError('Для встречи или напоминания нужны дата и время')
         if 'duration_minutes' in changes and existing.kind != EntryKind.meeting:
@@ -173,27 +184,35 @@ class EntryService:
     def create(
         self, *, kind: EntryKind, title: str, date: datetime.date | None,
         time: str | None, timezone: str, duration_minutes: int | None = None,
+        recurrence: Recurrence | None = None,
     ) -> Entry:
         duration_minutes = self._duration_for_create(kind, duration_minutes)
+        if recurrence is not None and date is None:
+            raise ValueError('Для повторяющейся записи нужна дата')
         embedding = self._embedding(title)
+        kwargs = {'recurrence': recurrence} if recurrence is not None else {}
         return self._repository.create(
             kind=kind, title=title, date=date, time=time, timezone=timezone,
             embedding=embedding, duration_minutes=duration_minutes,
             embedding_model=self._embedder.name if embedding is not None else None,
+            **kwargs,
         )
 
     def create_once(
         self, *, kind: EntryKind, title: str, date: datetime.date | None,
         time: str | None, timezone: str, duration_minutes: int | None = None,
+        recurrence: Recurrence | None = None,
     ) -> tuple[Entry, bool]:
         """Return the matching pending entry when the same command is repeated."""
         title = ' '.join(title.split())
         duration_minutes = self._duration_for_create(kind, duration_minutes)
         embedding = self._embedding(title)
+        kwargs = {'recurrence': recurrence} if recurrence is not None else {}
         return self._repository.create_once(
             kind=kind, title=title, date=date, time=time, timezone=timezone,
             embedding=embedding, duration_minutes=duration_minutes,
             embedding_model=self._embedder.name if embedding is not None else None,
+            **kwargs,
         )
 
     def list_period(

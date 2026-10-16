@@ -1,5 +1,5 @@
 import { delay, http, HttpResponse } from 'msw'
-import type { AssistantTurn, Entry, EntryList, ErrorResponse, HealthResponse, Schemas } from '@/api/types'
+import type { AssistantTurn, Entry, EntryList, EntryUpdate, ErrorResponse, HealthResponse, Schemas, SessionInfo } from '@/api/types'
 import { addDays, isoDate } from '@/utils/time'
 
 const API = (import.meta.env.VITE_API_URL ?? '').replace(/\/+$/, '')
@@ -15,7 +15,7 @@ const entries: Entry[] = [
   mkEntry('reminder', 'Оплатить интернет', isoDate(addDays(today, 4)), '09:00'),
 ]
 
-const drafts = new Map<string, { kind: Kind; title: string; date: string; tz: string; duration: number | null }>()
+const drafts = new Map<string, { kind: Kind; title: string; date: string; tz: string }>()
 
 function mkEntry(kind: Kind, title: string, date: string | null, time: string | null, duration: number | null = null, tz = tzDefault): Entry {
   return {
@@ -26,6 +26,7 @@ function mkEntry(kind: Kind, title: string, date: string | null, time: string | 
     time,
     timezone: tz,
     duration_minutes: kind === 'meeting' ? (duration ?? 60) : null,
+    recurrence: null,
     status: 'pending',
     created_at: new Date().toISOString(),
   }
@@ -46,27 +47,20 @@ function parseDate(text: string, tz: string): string {
   return isoDate(now, tz)
 }
 
-function parseDuration(text: string): number | null {
-  if (/на\s+полчаса/i.test(text)) return 30
-  const match = text.match(/на\s+(\d+)\s*(минут(?:у|ы)?|час(?:а|ов)?)/i)
-  if (!match) return null
-  return Number(match[1]) * (match[2].startsWith('час') ? 60 : 1)
-}
-
 function cleanTitle(text: string): string {
   const t = text
     .replace(/^(напомни( мне)?|поставь|создай|добавь|запланируй)\s*/i, '')
     .replace(/(встречу|задачу|напоминание)\s*/i, '')
     .replace(/(послезавтра|завтра|сегодня)/gi, '')
     .replace(/в\s*\d{1,2}([:.]\d{2})?(\s*(утра|дня|вечера))?/gi, '')
-    .replace(/на\s+(?:\d+\s*(?:минут(?:у|ы)?|час(?:а|ов)?)|полчаса)/gi, '')
     .replace(/\s+/g, ' ')
     .trim()
   return t ? t[0].toUpperCase() + t.slice(1) : 'Без названия'
 }
 
 function turn(p: Omit<AssistantTurn, 'turn_id'>): AssistantTurn {
-  return { ...p, turn_id: crypto.randomUUID() }
+  const suggestions = p.status === 'completed' && p.intent === 'create_entry' ? ['Отмени последнее'] : []
+  return { suggestions, ...p, turn_id: crypto.randomUUID() }
 }
 
 function describe(e: Entry): string {
@@ -84,7 +78,7 @@ function handle(text: string, tz: string, conversationId: string | undefined): A
       return turn({ ...base, assistant_text: 'Не понял время. Назовите, например, «в 15:00».', status: 'needs_clarification', intent: 'create_entry', entries: [] })
     }
     drafts.delete(cid)
-    const e = mkEntry(draft.kind, draft.title, draft.date, time, draft.duration, draft.tz)
+    const e = mkEntry(draft.kind, draft.title, draft.date, time, null, draft.tz)
     entries.push(e)
     return turn({ ...base, assistant_text: `Готово: ${describe(e)}.`, status: 'completed', intent: 'create_entry', entries: [e] })
   }
@@ -119,12 +113,11 @@ function handle(text: string, tz: string, conversationId: string | undefined): A
     const title = cleanTitle(text)
     const date = parseDate(text, tz)
     const time = parseTime(text)
-    const duration = kind === 'meeting' ? parseDuration(text) : null
     if (kind !== 'task' && !time) {
-      drafts.set(cid, { kind, title, date, tz, duration })
+      drafts.set(cid, { kind, title, date, tz })
       return turn({ ...base, assistant_text: kind === 'meeting' ? 'На какое время поставить встречу?' : 'Во сколько напомнить?', status: 'needs_clarification', intent: 'create_entry', entries: [] })
     }
-    const e = mkEntry(kind, title, date, time, duration, tz)
+    const e = mkEntry(kind, title, date, time, null, tz)
     entries.push(e)
     return turn({ ...base, assistant_text: `Создал: ${describe(e)}.`, status: 'completed', intent: 'create_entry', entries: [e] })
   }
@@ -178,4 +171,56 @@ export const handlers = [
     )
     return HttpResponse.json<EntryList>({ items })
   }),
+
+  http.get(`${API}/v1/session`, () =>
+    HttpResponse.json<SessionInfo>({
+      user_id: '00000000-0000-4000-8000-000000000000',
+      access_code_required: false,
+      unlocked: true,
+      llm_provider: 'mock',
+      asr_enabled: true,
+      voice_enabled: true,
+    }),
+  ),
+
+  http.get(`${API}/v1/entries/undated`, () => HttpResponse.json<EntryList>({ items: entries.filter((e) => !e.date) })),
+
+  http.get(`${API}/v1/calendar`, () => HttpResponse.json({ url: `${location.origin}/v1/calendar/feed/mock.ics` })),
+  http.post(`${API}/v1/calendar/rotate`, () => HttpResponse.json({ url: `${location.origin}/v1/calendar/feed/mock2.ics` })),
+  http.get(`${API}/v1/assistant/summary`, () => {
+    const todays = entries.filter((e) => e.date === isoDate(new Date()))
+    return HttpResponse.json({
+      assistant_text: todays.length ? `Сегодня записей: ${todays.length}.` : 'На сегодня ничего не запланировано.',
+      entries: todays,
+    })
+  }),
+  http.get(`${API}/v1/status`, () =>
+    HttpResponse.json({
+      services: [
+        { name: 'Понимание команд', state: 'off', detail: 'моки, без сервера' },
+        { name: 'Распознавание речи', state: 'off', detail: 'моки' },
+        { name: 'Озвучка', state: 'off', detail: 'только голос браузера' },
+      ],
+    }),
+  ),
+
+  http.patch<{ id: string }, EntryUpdate, Entry | ErrorResponse>(`${API}/v1/entries/:id`, async ({ params, request }) => {
+    const entry = entries.find((e) => e.id === params.id)
+    if (!entry) return err(404, 'Запись не найдена')
+    Object.assign(entry, await request.json(), { updated_at: new Date().toISOString() })
+    return HttpResponse.json<Entry>(entry)
+  }),
+
+  http.delete<{ id: string }>(`${API}/v1/entries/:id`, ({ params }) => {
+    const i = entries.findIndex((e) => e.id === params.id)
+    if (i === -1) return err(404, 'Запись не найдена')
+    entries.splice(i, 1)
+    return new HttpResponse(null, { status: 204 })
+  }),
+
+  http.get(`${API}/v1/speech/voices`, () =>
+    HttpResponse.json({ available: false, loading: false, voices: [] }),
+  ),
+
+  http.post(`${API}/v1/speech/synthesize`, () => err(503, 'В режиме моков озвучка только в браузере')),
 ]

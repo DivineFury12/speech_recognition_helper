@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted } from 'vue'
+import { onBeforeUnmount, onMounted } from 'vue'
 import { storeToRefs } from 'pinia'
 import { useEntriesStore, type Period } from '@/stores/entries'
 import EntryItem from './EntryItem.vue'
@@ -10,9 +10,25 @@ const { period, items, loading, error } = storeToRefs(store)
 const tabs: { id: Period; label: string }[] = [
   { id: 'today', label: 'Сегодня' },
   { id: 'week', label: 'На неделю' },
+  { id: 'undated', label: 'Без срока' },
 ]
 
-onMounted(() => store.refresh())
+const emptyText: Record<Period, string> = {
+  today: 'На сегодня записей нет',
+  week: 'На неделю записей нет',
+  undated: 'Задач без срока нет',
+}
+
+const REFRESH_MS = 60_000
+let timer: number | undefined
+
+onMounted(() => {
+  void store.refresh()
+  timer = window.setInterval(() => {
+    if (document.visibilityState === 'visible') void store.refresh(true)
+  }, REFRESH_MS)
+})
+onBeforeUnmount(() => window.clearInterval(timer))
 </script>
 
 <template>
@@ -26,21 +42,25 @@ onMounted(() => store.refresh())
           role="tab"
           :aria-selected="period === t.id"
           :class="{ active: period === t.id }"
-          :title="t.id === 'week' ? 'Сегодня и следующие 7 дней' : undefined"
           @click="store.setPeriod(t.id)"
         >
           {{ t.label }}
         </button>
       </div>
-      <button type="button" class="link" :disabled="loading" @click="store.refresh()">
-        {{ loading ? 'Загрузка…' : 'Обновить' }}
-      </button>
+      <span v-if="loading" class="spinner small" aria-label="Обновляю" />
     </div>
 
     <div v-if="error" class="banner error">{{ error }}</div>
-    <p v-else-if="!items.length && !loading" class="empty">Записей нет</p>
+    <p v-if="!items.length && !loading" class="empty">{{ emptyText[period] }}</p>
     <ul class="entry-list" :class="{ dim: loading }">
-      <EntryItem v-for="e in items" :key="e.id" :entry="e" />
+      <EntryItem
+        v-for="e in items"
+        :key="`${e.id}:${e.date ?? ''}`"
+        :entry="e"
+        @toggle="store.toggleDone"
+        @save="store.save"
+        @remove="store.remove"
+      />
     </ul>
   </aside>
 </template>

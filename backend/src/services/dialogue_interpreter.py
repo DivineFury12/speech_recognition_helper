@@ -156,7 +156,11 @@ class DialogueInterpreter:
                 index = reply.choice - 1
                 if 0 <= index < len(candidates):
                     return CandidateResolution(selected=candidates[index])
-            return CandidateResolution()
+            if reply.act != ReplyAct.unclear:
+                return CandidateResolution()
+            # The model was unsure; a plain ordinal or number in the reply is still unambiguous.
+            grounded = self._grounded_candidate(text, candidates, today, allow_schedule_match=False)
+            return CandidateResolution(selected=grounded)
         old_schedule_reference = bool(re.search(
             r'\b(?:ту|тот|которая|который|сейчас|из)\b', text.casefold(),
         ))

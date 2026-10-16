@@ -4,7 +4,7 @@
     [switch]$NoVoice
 )
 
-$ErrorActionPreference = "Stop"
+$ErrorActionPreference = "Continue"
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
 $backend = Join-Path $root "backend"
 $frontend = Join-Path $root "frontend"

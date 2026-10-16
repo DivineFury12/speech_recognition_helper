@@ -12,6 +12,7 @@ const browserSupported = typeof window !== 'undefined' && 'speechSynthesis' in w
 function readVoice(): string {
   try {
     const saved = localStorage.getItem(STORAGE_KEY)
+    if (saved === 'alina' || saved === 'evgeny') return 'ksenia'
     if (saved) return saved
     return localStorage.getItem(LEGACY_KEY) === '1' ? BROWSER_VOICE : VOICE_OFF
   } catch {
@@ -58,7 +59,7 @@ watch(volume, (v) => {
 const enabled = computed(() => voice.value !== VOICE_OFF)
 const currentName = computed(() => {
   if (voice.value === VOICE_OFF) return 'Без озвучки'
-  if (voice.value === BROWSER_VOICE) return 'Браузер'
+  if (voice.value === BROWSER_VOICE) return 'Робот'
   return serverVoices.value.find((v) => v.id === voice.value)?.name ?? 'Голос'
 })
 

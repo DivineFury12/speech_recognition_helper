@@ -528,9 +528,9 @@ export interface components {
          */
         Recurrence: "daily" | "weekdays" | "weekly" | "monthly" | null;
         VoiceInfo: {
-            /** @example alina */
+            /** @example ksenia */
             id: string;
-            /** @example Алина */
+            /** @example Ксения */
             name: string;
             /** @example мужской голос */
             description: string;
@@ -1276,8 +1276,8 @@ export interface operations {
                     /** @example Напоминание на завтра, 10:00, создано. */
                     text: string;
                     /**
-                     * @default alina
-                     * @example alina
+                     * @default ksenia
+                     * @example ksenia
                      */
                     voice?: string;
                 };

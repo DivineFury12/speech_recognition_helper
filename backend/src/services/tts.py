@@ -79,10 +79,8 @@ class Voice:
 
 
 VOICES = [
-    Voice("alina", "Алина", "женский голос", "xenia"),
     Voice("ksenia", "Ксения", "женский голос", "kseniya"),
     Voice("aidar", "Айдар", "мужской голос", "aidar"),
-    Voice("evgeny", "Евгений", "мужской голос", "eugene"),
 ]
 
 

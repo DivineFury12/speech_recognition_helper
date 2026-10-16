@@ -29,7 +29,7 @@ const options = computed(() => [
     note: serverAvailable.value ? v.description : serverLoading.value ? 'загружается…' : 'недоступен',
     disabled: !serverAvailable.value,
   })),
-  ...(browserSupported ? [{ id: BROWSER_VOICE, name: 'Браузер', note: 'встроенный голос системы', disabled: false }] : []),
+  ...(browserSupported ? [{ id: BROWSER_VOICE, name: 'Робот', note: 'голос браузера, работает без сервера', disabled: false }] : []),
 ])
 
 function choose(id: string) {

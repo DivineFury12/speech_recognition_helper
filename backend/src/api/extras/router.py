@@ -51,7 +51,7 @@ class CalendarLink(pydantic.BaseModel):
 
 class SynthesizeRequest(pydantic.BaseModel):
     text: str = pydantic.Field(min_length=1, max_length=1000)
-    voice: str = pydantic.Field(default='alina', min_length=1, max_length=40)
+    voice: str = pydantic.Field(default='ksenia', min_length=1, max_length=40)
 
 
 class VoiceInfo(pydantic.BaseModel):

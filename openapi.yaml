@@ -576,8 +576,8 @@ paths:
                   example: Напоминание на завтра, 10:00, создано.
                 voice:
                   type: string
-                  default: alina
-                  example: alina
+                  default: ksenia
+                  example: ksenia
       responses:
         '200':
           description: Аудио с ответом
@@ -891,10 +891,10 @@ components:
       properties:
         id:
           type: string
-          example: alina
+          example: ksenia
         name:
           type: string
-          example: Алина
+          example: Ксения
         description:
           type: string
           example: мужской голос

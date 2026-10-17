@@ -12,9 +12,14 @@ WEEKDAYS = {
     'пятниц': 4, 'суббот': 5, 'воскресен': 6,
 }
 MONTHS = {
-    'январ': 1, 'феврал': 2, 'март': 3, 'апрел': 4, 'мая': 5,
-    'июн': 6, 'июл': 7, 'август': 8, 'сентябр': 9, 'октябр': 10,
-    'ноябр': 11, 'декабр': 12,
+    'январ': 1, 'феврал': 2, 'март': 3, 'апрел': 4,
+    'май': 5, 'мая': 5, 'мае': 5, 'маю': 5,
+    'июн': 6, 'июл': 7, 'август': 8, 'сентябр': 9,
+    'октябр': 10, 'ноябр': 11, 'декабр': 12,
+}
+MONTH_ABBREVIATIONS = {
+    'янв': 1, 'фев': 2, 'мар': 3, 'апр': 4, 'авг': 8,
+    'сен': 9, 'сент': 9, 'окт': 10, 'ноя': 11, 'дек': 12,
 }
 
 HOUR_WORDS = {
@@ -53,7 +58,11 @@ HOUR_PATTERN = '|'.join(sorted((re.escape(word) for word in HOUR_WORDS), key=len
 HOUR_PATTERN = rf'(?:\d{{1,2}}|{HOUR_PATTERN})'
 COUNT_PATTERN = rf'(?:\d{{1,4}}|{HOUR_PATTERN})'
 DATE_UNIT_PATTERN = r'(?P<unit>недел\w*|день|дня|дней|сутк\w*|суток)'
-MONTH_PATTERN = '|'.join(rf'{stem}\w*' for stem in MONTHS)
+MONTH_PATTERN = '|'.join(
+    [rf'{stem}\w*' for stem in MONTHS if not stem.startswith('ма')]
+    + [r'ма[йяею]']
+    + [rf'{stem}\.?(?!\w)' for stem in MONTH_ABBREVIATIONS]
+)
 
 TITLE_STOPWORDS = {
     'создай', 'создать', 'добавь', 'добавить', 'поставь', 'поставить',
@@ -77,6 +86,14 @@ def _in_text(phrase: str | None, text: str) -> bool:
     if not phrase:
         return False
     return ' '.join(phrase.casefold().split()) in ' '.join(text.casefold().split())
+
+
+def _month_number(token: str) -> int:
+    value = token.rstrip('.')
+    for stem, month in MONTHS.items():
+        if value.startswith(stem):
+            return month
+    return MONTH_ABBREVIATIONS[value]
 
 
 def _calendar_date(day: int, month: int, year: int | None, today: datetime.date) -> datetime.date | None:
@@ -138,10 +155,12 @@ def parse_date(phrase: str, today: datetime.date) -> datetime.date | None:
             int(numeric.group(3)) if numeric.group(3) else None, today,
         )
 
-    for stem, month in MONTHS.items():
-        month_match = re.search(rf'(?<!\d)(\d{{1,2}})\s+{stem}\w*', value)
-        if month_match:
-            return _calendar_date(int(month_match.group(1)), month, None, today)
+    month_match = re.search(
+        rf'(?<!\d)(?P<day>\d{{1,2}})\s+(?P<month>{MONTH_PATTERN})\.?(?!\w)', value,
+    )
+    if month_match:
+        return _calendar_date(int(month_match.group('day')),
+                              _month_number(month_match.group('month')), None, today)
 
     for stem, weekday in WEEKDAYS.items():
         if stem in value:
@@ -171,25 +190,103 @@ def parse_target_date(phrase: str, today: datetime.date) -> datetime.date | None
 def parse_period(text: str, today: datetime.date) -> tuple[datetime.date, datetime.date] | None:
     """Resolve common list periods from the user's words, not model dates."""
     value = text.casefold().replace('ё', 'е')
-    range_match = re.search(
-        rf'\bс\s+(?P<start>\d{{1,2}})(?:\s+(?P<start_month>{MONTH_PATTERN}))?'
-        rf'\s+по\s+(?P<end>\d{{1,2}})\s+(?P<end_month>{MONTH_PATTERN})\b',
-        value,
+    numeric_range = re.search(
+        r'\bс\s+(?P<start>\d{1,2})[./](?P<start_month>\d{1,2})'
+        r'(?:[./](?P<start_year>\d{2,4}))?\s+по\s+'
+        r'(?P<end>\d{1,2})[./](?P<end_month>\d{1,2})'
+        r'(?:[./](?P<end_year>\d{2,4}))?(?!\d)', value,
     )
-    if range_match:
-        end_stem = next(stem for stem in MONTHS if range_match.group('end_month').startswith(stem))
-        start_month_text = range_match.group('start_month') or range_match.group('end_month')
-        start_stem = next(stem for stem in MONTHS if start_month_text.startswith(stem))
+    if numeric_range:
+        start_year = numeric_range.group('start_year') or numeric_range.group('end_year')
+        end_year = numeric_range.group('end_year') or numeric_range.group('start_year')
+        start_year = 2000 + int(start_year) if start_year and len(start_year) == 2 else int(start_year or today.year)
+        end_year = 2000 + int(end_year) if end_year and len(end_year) == 2 else int(end_year or today.year)
+        if (not numeric_range.group('start_year') and not numeric_range.group('end_year')
+                and int(numeric_range.group('end_month')) < int(numeric_range.group('start_month'))):
+            end_year += 1
         try:
-            start = datetime.date(today.year, MONTHS[start_stem], int(range_match.group('start')))
-            end = datetime.date(today.year, MONTHS[end_stem], int(range_match.group('end')))
+            start = datetime.date(start_year, int(numeric_range.group('start_month')),
+                                  int(numeric_range.group('start')))
+            end = datetime.date(end_year, int(numeric_range.group('end_month')),
+                                int(numeric_range.group('end')))
         except ValueError:
             return None
         return (start, end) if start <= end else None
+    range_match = re.search(
+        rf'\bс\s+(?P<start>\d{{1,2}})(?:\s+(?P<start_month>{MONTH_PATTERN}))?'
+        rf'\s+по\s+(?P<end>\d{{1,2}})\s+(?P<end_month>{MONTH_PATTERN})\.?(?!\w)',
+        value,
+    )
+    if range_match:
+        start_month_text = range_match.group('start_month') or range_match.group('end_month')
+        try:
+            start = datetime.date(today.year, _month_number(start_month_text),
+                                  int(range_match.group('start')))
+            end = datetime.date(today.year, _month_number(range_match.group('end_month')),
+                                int(range_match.group('end')))
+        except ValueError:
+            return None
+        return (start, end) if start <= end else None
+    relative_month = re.search(
+        r'\b(?P<which>эт\w*|текущ\w*|следующ\w*|прошл\w*)\s+месяц\w*\b',
+        value,
+    )
+    if relative_month:
+        which = relative_month.group('which')
+        offset = 1 if which.startswith('следующ') else -1 if which.startswith('прошл') else 0
+        index = today.year * 12 + today.month - 1 + offset
+        year, zero_month = divmod(index, 12)
+        start = datetime.date(year, zero_month + 1, 1)
+        next_year, next_zero_month = divmod(index + 1, 12)
+        end = datetime.date(next_year, next_zero_month + 1, 1) - datetime.timedelta(days=1)
+        return start, end
+    if re.search(r'\bна\s+месяц\b', value):
+        return today, today + datetime.timedelta(days=29)
+    month_match = next((match for match in re.finditer(
+        rf'(?<!\w)(?P<month>{MONTH_PATTERN})\.?(?:\s+(?P<year>\d{{4}}))?(?!\w)',
+        value,
+    ) if not re.search(r'\d{1,2}\s+$', value[:match.start()])), None)
+    if month_match:
+        month = _month_number(month_match.group('month'))
+        year = int(month_match.group('year') or today.year)
+        prefix = value[:month_match.start()]
+        if month_match.group('year') is None:
+            if re.search(r'\bследующ\w*\s*$', prefix):
+                year += 1
+            elif re.search(r'\bпрошл\w*\s*$', prefix):
+                year -= 1
+        try:
+            start = datetime.date(year, month, 1)
+            end = (datetime.date(year + 1, 1, 1) if month == 12
+                   else datetime.date(year, month + 1, 1)) - datetime.timedelta(days=1)
+        except ValueError:
+            return None
+        return start, end
+    season_match = re.search(r'\b(?P<season>весн\w*|лет\w*|осен\w*|зим\w*)\b', value)
+    if season_match:
+        season = season_match.group('season')
+        month = (3 if season.startswith('весн') else 6 if season.startswith('лет')
+                 else 9 if season.startswith('осен') else 12)
+        year = today.year - (today.month < 3) if month == 12 else today.year
+        prefix = value[:season_match.start()]
+        if re.search(r'\bследующ\w*\s*$', prefix):
+            year += 1
+        elif re.search(r'\bпрошл\w*\s*$', prefix):
+            year -= 1
+        start = datetime.date(year, month, 1)
+        end = (datetime.date(year + 1, 3, 1) if month == 12
+               else datetime.date(year, month + 3, 1)) - datetime.timedelta(days=1)
+        return start, end
     if re.search(r'\b(?:на|за)\s+последн\w*\s+недел\w*\b', value):
         return today - datetime.timedelta(days=6), today
-    if re.search(r'\b(?:на|за)\s+(?:следующ\w*|ближайш\w*)\s+недел\w*\b', value):
+    if re.search(r'\bближайш\w*\s+недел\w*\b', value):
+        return today, today + datetime.timedelta(days=6)
+    if re.search(r'\bследующ\w*\s+недел\w*\b', value):
         start = today + datetime.timedelta(days=7 - today.weekday())
+        if re.search(r'\b(?:втор\w*|2-?й)\s+половин\w*\b', value):
+            return start + datetime.timedelta(days=3), start + datetime.timedelta(days=6)
+        if re.search(r'\b(?:перв\w*|1-?й)\s+половин\w*\b', value):
+            return start, start + datetime.timedelta(days=2)
         return start, start + datetime.timedelta(days=6)
     if re.search(r'\b(?:на|за|в)\s+прошл\w*\s+недел\w*\b', value):
         start = today - datetime.timedelta(days=today.weekday() + 7)
@@ -389,7 +486,8 @@ def _title_has_source(title: str | None, text: str) -> bool:
             word for word in words
             if len(word) >= 3 and word not in TITLE_STOPWORDS
             and word not in HOUR_WORDS
-            and not any(word.startswith(stem) for stem in (*MONTHS, *WEEKDAYS))
+            and not re.fullmatch(rf'(?:{MONTH_PATTERN})', word)
+            and not any(word.startswith(stem) for stem in WEEKDAYS)
         }
 
     return bool(content_words(title) & content_words(text))
@@ -407,8 +505,41 @@ def _query_has_source(query: str | None, text: str) -> bool:
     )
 
 
-def verify_search_query(query: str | None, text: str) -> str | None:
-    return query if _query_has_source(query, text) else None
+SEARCH_FILTER_WORDS = TITLE_STOPWORDS | {
+    'какие', 'какая', 'какой', 'есть', 'выведи', 'перечисли', 'найди',
+    'поищи', 'все', 'моих', 'планы', 'планов', 'дела', 'делах',
+    'события', 'событий', 'событие', 'запланировано', 'связанные',
+    'связанных', 'связано', 'этот', 'этом', 'текущий', 'текущем', 'прошлый',
+    'прошлом', 'следующий', 'следующем', 'ближайший', 'ближайшую',
+}
+SEARCH_FILTER_STEMS = (
+    'напомин', 'задач', 'встреч', 'созвон', 'запис', 'событ',
+    'недел', 'месяц', 'сегодня', 'завтра', 'позавчера',
+)
+
+
+def _topic_words(value: str) -> list[str]:
+    words = re.findall(r'[а-яёa-z]+', value.casefold().replace('ё', 'е'))
+    return [word for word in words
+            if len(word) >= 3 and word not in SEARCH_FILTER_WORDS
+            and not word.startswith(SEARCH_FILTER_STEMS)
+            and not re.fullmatch(rf'(?:{MONTH_PATTERN})', word)
+            and not re.fullmatch(r'(?:осен\w*|весн\w*|зим\w*|лето|летом|лета)', word)
+            and word not in {'день', 'дня', 'дней', 'сутки', 'суток'}
+            and not any(word.startswith(stem) for stem in WEEKDAYS)]
+
+
+def verify_search_query(query: str | None, text: str, *, topic: bool = False) -> str | None:
+    if not _query_has_source(query, text):
+        return None
+    if topic:
+        source = _topic_words(text)
+        if not source or not any(
+            any(word.startswith(candidate[:3]) for word in source)
+            for candidate in _topic_words(query)
+        ):
+            return None
+    return query
 
 
 def mentioned_entry_kind(text: str) -> EntryKind | None:
@@ -433,6 +564,17 @@ def verify_creation_fields(
     time = parse_time(command.time_phrase) if _in_text(command.time_phrase, text) else None
     if time is None:
         time = parse_time(text)
+    time_phrase = command.time_phrase if _in_text(command.time_phrase, text) else None
+    duration_text = text
+    if time is not None and time_phrase and parse_time(time_phrase) == time:
+        # A clock expression such as «на 17 часов» is not also a 17-hour
+        # duration. A separate length later in the sentence is still parsed.
+        duration_text = re.sub(re.escape(time_phrase), '', text, count=1, flags=re.IGNORECASE)
+    duration = parse_duration(duration_text) if command.kind == EntryKind.meeting else None
+    if (duration is not None and time is not None and not time_phrase
+            and command.duration_phrase is None and duration == int(time[:2]) * 60
+            and parse_duration(text) == duration):
+        duration = None
     return command.model_copy(update={
         'title': command.title if _title_has_source(command.title, text) else None,
         'date': date, 'date_phrase': command.date_phrase if date is not None else None,
@@ -440,7 +582,7 @@ def verify_creation_fields(
         'time_phrase': (
             command.time_phrase if time is not None else ambiguous_time_phrase(text)
         ),
-        'duration_minutes': parse_duration(text) if command.kind == EntryKind.meeting else None,
+        'duration_minutes': duration,
     })
 
 

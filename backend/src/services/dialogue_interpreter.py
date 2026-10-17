@@ -13,8 +13,8 @@ from src.schemas.dialogue import (DialogueTransition, PendingReply, PendingStep,
                                   ReplyAct, ScheduleRole, transition_for_reply)
 from src.services.entries import EntryService
 from src.services.selection import selection_is_grounded
-from src.services.temporal import (ambiguous_time_options, parse_date, parse_target_date,
-                                   parse_time, replacement_schedule_reply)
+from src.services.temporal import (ambiguous_time_options, parse_date, parse_period,
+                                   parse_target_date, parse_time, replacement_schedule_reply)
 
 
 logger = logging.getLogger(__name__)
@@ -275,6 +275,12 @@ class DialogueInterpreter:
                      or (previous.action == AssistantIntent.create_entry
                          and step == PendingStep.fields))
                 and replacement_schedule_reply(text, today) is not None):
+            reply = PendingReply(act=ReplyAct.continue_command)
+            transition = DialogueTransition.continue_command
+
+        if (previous is not None and reply is not None and reply.act == ReplyAct.unclear
+                and previous.action in (AssistantIntent.list_entries, AssistantIntent.search_entries)
+                and parse_period(text, today) is not None):
             reply = PendingReply(act=ReplyAct.continue_command)
             transition = DialogueTransition.continue_command
 

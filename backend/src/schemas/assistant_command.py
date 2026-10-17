@@ -21,6 +21,7 @@ class AssistantCommand(pydantic.BaseModel):
     action: AssistantIntent
     action_phrase: str | None = None
     target_reference_phrase: str | None = None
+    source_reference_phrase: str | None = None
     update_mode: UpdateMode | None = None
     kind: EntryKind | None = None
     title: str | None = None
@@ -61,7 +62,7 @@ class AssistantCommand(pydantic.BaseModel):
     @pydantic.field_validator('title', 'query', 'date_phrase', 'time_phrase',
                              'duration_phrase', 'target_query', 'target_date_phrase',
                              'target_time_phrase', 'new_title', 'action_phrase',
-                             'target_reference_phrase')
+                             'target_reference_phrase', 'source_reference_phrase')
     @classmethod
     def strip_text(cls, value: str | None) -> str | None:
         if value is None:
@@ -78,13 +79,12 @@ class AssistantCommand(pydantic.BaseModel):
                 raise ValueError('create_entry contains unrelated fields')
         elif self.action == AssistantIntent.list_entries:
             if any(value is not None for value in (
-                self.title, self.date, self.time, self.date_phrase, self.time_phrase, self.query,
+                self.title, self.date, self.time, self.date_phrase, self.time_phrase,
             )):
                 raise ValueError('list_entries contains unrelated fields')
         elif self.action == AssistantIntent.search_entries:
             if any(value is not None for value in (
                 self.title, self.date, self.time, self.date_phrase, self.time_phrase,
-                self.date_from, self.date_to,
             )):
                 raise ValueError('search_entries contains unrelated fields')
         elif self.action in (AssistantIntent.complete_entry, AssistantIntent.update_entry,

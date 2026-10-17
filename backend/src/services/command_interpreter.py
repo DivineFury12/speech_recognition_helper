@@ -89,11 +89,17 @@ class CommandInterpreter:
                 action=previous.action, kind=update.kind,
                 date_from=period[0] if period else None,
                 date_to=period[1] if period else None,
+                query=verify_search_query(update.query, text, topic=True),
             )
         if previous.action == AssistantIntent.search_entries:
+            period = parse_period(text, today)
             return AssistantCommand(
                 action=previous.action, kind=update.kind,
-                query=verify_search_query(update.query or update.target_query or update.title, text),
+                query=verify_search_query(
+                    update.query or update.target_query or update.title, text, topic=True,
+                ),
+                date_from=period[0] if period else None,
+                date_to=period[1] if period else None,
             )
         return update
 

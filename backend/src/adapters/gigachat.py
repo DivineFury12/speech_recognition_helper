@@ -34,7 +34,7 @@ class GigaChatClient:
         self._auth_url = auth_url
         self._chat_url = chat_url
         self._http = http_client or httpx.Client(
-            timeout=45.0,
+            timeout=httpx.Timeout(connect=8.0, read=30.0, write=10.0, pool=8.0),
             verify=ca_bundle or True,
         )
         self._owns_http = http_client is None
@@ -106,7 +106,7 @@ class GigaChatClient:
                     token = self._access_token(refresh=True)
                     refreshed_token = True
                     continue
-                if response.status_code in (502, 503, 504) and attempt < 2:
+                if response.status_code in (502, 503, 504) and attempt < 1:
                     time.sleep(0.4 * (attempt + 1))
                     continue
                 response.raise_for_status()
@@ -116,7 +116,7 @@ class GigaChatClient:
                     raise ValueError('model response is not an object')
                 return result
             except httpx.TransportError as exc:
-                if attempt < 2:
+                if attempt < 1 and not isinstance(exc, httpx.ReadTimeout):
                     time.sleep(0.4 * (attempt + 1))
                     continue
                 raise GigaChatAPIError('Не удалось связаться с GigaChat') from exc

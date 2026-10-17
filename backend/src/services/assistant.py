@@ -3,6 +3,7 @@ import dataclasses
 import datetime
 import hashlib
 import json
+import logging
 import re
 import uuid
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -36,6 +37,7 @@ SPLIT_RE = re.compile(
 )
 _now: contextvars.ContextVar[datetime.datetime | None] = contextvars.ContextVar('assistant_now', default=None)
 UNDO_FIELDS = ('title', 'date', 'time', 'duration_minutes', 'recurrence', 'status')
+logger = logging.getLogger(__name__)
 
 
 class InvalidTimezoneError(ValueError):
@@ -71,9 +73,10 @@ class AssistantService:
                 if command.time is None:
                     missing.append('время')
         elif command.action == AssistantIntent.list_entries:
-            if command.date_from is None or command.date_to is None:
+            if (command.date_from is None or command.date_to is None) and command.query is None:
                 missing.append('период')
-        elif command.action == AssistantIntent.search_entries and command.query is None:
+        elif (command.action == AssistantIntent.search_entries and command.query is None
+              and (command.date_from is None or command.date_to is None)):
             missing.append('поисковый запрос')
         return missing
 
@@ -202,14 +205,13 @@ class AssistantService:
         return f'Что изменить в записи «{entry.title}»: название, дату, время или длительность?'
 
     @classmethod
-    def _past_note(cls, date: datetime.date | None, time: str | None, *, explicit: bool) -> str | None:
-        """Explain why a date is suspicious. A past day counts only if the user named it
-        («вчера», «в прошлую пятницу»): a model must not move a record into the past silently."""
+    def _past_note(cls, date: datetime.date | None, time: str | None) -> str | None:
+        """Require confirmation before creating or moving a record into the past."""
         if date is None:
             return None
         now = cls._now()
         today = now.date()
-        if date < today and explicit:
+        if date < today:
             return (f'{phrasing.format_date(date, today).capitalize()} — это '
                     f'{phrasing.format_day(date, today)}, этот день уже прошёл.')
         if date == today and time is not None and time < now.strftime('%H:%M'):
@@ -308,8 +310,7 @@ class AssistantService:
             new_date = changes.get('date', entry.date)
             new_time = changes.get('time', entry.time)
             if ('date' in changes or 'time' in changes) and 'past' not in forced:
-                note = self._past_note(new_date, new_time,
-                                       explicit=bool(PAST_WORDS_RE.search(text)) or 'past_words' in forced)
+                note = self._past_note(new_date, new_time)
                 if note:
                     pending = command.model_copy(update={
                         'confirm': 'past', 'confirm_entry_id': entry.id, 'candidate_ids': None,
@@ -654,8 +655,7 @@ class AssistantService:
         if command.recurrence is not None and command.date is None:
             command = command.model_copy(update={'date': first_date(command.recurrence, today)})
         if 'past' not in forced and command.recurrence is None:
-            note = self._past_note(command.date, command.time,
-                                   explicit=bool(PAST_WORDS_RE.search(text)) or 'past_words' in forced)
+            note = self._past_note(command.date, command.time)
             if note:
                 pending = command.model_copy(update={'confirm': 'past'})
                 return self._turn(conversation_id, text, command,
@@ -835,6 +835,25 @@ class AssistantService:
         previous = resolved.previous
         explicit_target = resolved.explicit_target
         pronoun_reference = resolved.pronoun_reference
+        if command.action == AssistantIntent.create_entry and command.source_reference_phrase:
+            source = (self._entries.get(state.last_entry_id)
+                      if self._entries is not None and state is not None
+                      and state.last_entry_id is not None else None)
+            if source is None:
+                return self._turn(
+                    conversation_id, text, command,
+                    'Не вижу запись, данные которой нужно повторить. Назовите её или создайте новую запись полностью.',
+                    AssistantStatus.no_action, [],
+                )
+            kind = command.kind or source.kind
+            command = command.model_copy(update={
+                'kind': kind,
+                'title': command.title or source.title,
+                'date': command.date or source.date,
+                'time': command.time or source.time,
+                'duration_minutes': ((command.duration_minutes or source.duration_minutes)
+                                     if kind == EntryKind.meeting else None),
+            })
         if (command.action in (AssistantIntent.update_entry, AssistantIntent.delete_entry)
                 and ONLY_THIS_RE.search(text)):
             # Keep «только эту» through clarifications: the reply «да» no longer contains the word.
@@ -887,17 +906,36 @@ class AssistantService:
             answer = 'Команда распознана, но запись и поиск пока не подключены. Действие не выполнено.'
         elif command.action == AssistantIntent.create_entry:
             return self._create(conversation_id, text, command, timezone)
-        elif command.action == AssistantIntent.list_entries:
-            result_entries = self._entries.list_period(
-                command.date_from, command.date_to, kind=command.kind,
-            )
-            answer = self._list_answer(command, result_entries, today)
-            status = AssistantStatus.completed
-        elif command.action == AssistantIntent.search_entries:
-            result_entries = self._entries.search(command.query, kind=command.kind)
-            answer = ('Нашёл:\n' + '\n'.join(phrasing.entry_line(e, today, show_date=True)
-                                             for e in result_entries)
-                      if result_entries else f'Не нашёл ничего похожего на «{command.query}».')
+        elif command.action in (AssistantIntent.list_entries, AssistantIntent.search_entries):
+            has_period = command.date_from is not None and command.date_to is not None
+            if command.query:
+                result_entries = self._entries.search(
+                    command.query, kind=command.kind,
+                    date_from=command.date_from, date_to=command.date_to,
+                )
+                classify_relevant = getattr(self._extractor, 'classify_relevant_entries', None)
+                if result_entries and callable(classify_relevant):
+                    try:
+                        result_entries = classify_relevant(command.query, result_entries)
+                    except Exception:
+                        logger.warning('Search relevance classifier unavailable', exc_info=True)
+                        return self._turn(
+                            conversation_id, text, command,
+                            'Не удалось проверить результаты поиска по теме. Попробуйте ещё раз.',
+                            AssistantStatus.no_action, [],
+                        )
+            else:
+                result_entries = self._entries.list_period(
+                    command.date_from, command.date_to, kind=command.kind,
+                )
+            if has_period:
+                answer = self._list_answer(command, result_entries, today)
+                if command.query:
+                    answer = f'По теме «{command.query}». {answer}'
+            else:
+                answer = ('Нашёл:\n' + '\n'.join(phrasing.entry_line(e, today, show_date=True)
+                                                 for e in result_entries)
+                          if result_entries else f'Не нашёл ничего похожего на «{command.query}».')
             status = AssistantStatus.completed
         elif command.action in (
             AssistantIntent.complete_entry, AssistantIntent.update_entry,

@@ -248,13 +248,16 @@ class SqlAlchemyEntryRepository:
         result.sort(key=lambda e: (e.date, e.time is None, e.time or '', e.created_at))
         return result
 
-    def search_text(self, query: str, *, kind: EntryKind | None = None, limit: int = 5) -> list[Entry]:
+    def search_text(self, query: str, *, kind: EntryKind | None = None, limit: int = 5,
+                    candidate_ids: set[uuid.UUID] | None = None) -> list[Entry]:
         statement = select(EntryRow).where(
             EntryRow.user_id == current_user(),
             func.strpos(func.lower(EntryRow.title), query.lower()) > 0,
         )
         if kind is not None:
             statement = statement.where(EntryRow.kind == kind.value)
+        if candidate_ids is not None:
+            statement = statement.where(EntryRow.id.in_(candidate_ids))
         statement = statement.order_by(EntryRow.created_at.desc()).limit(limit)
         with database_session(self._sessions) as session:
             return [_to_entry(row) for row in session.scalars(statement)]
@@ -263,6 +266,7 @@ class SqlAlchemyEntryRepository:
         self, embedding: list[float], *, embedding_model: str,
         kind: EntryKind | None = None, limit: int = 5,
         min_similarity: float = 0.0,
+        candidate_ids: set[uuid.UUID] | None = None,
     ) -> list[Entry]:
         distance = EntryEmbeddingRow.embedding.cosine_distance(embedding)
         statement = select(EntryRow).join(EntryEmbeddingRow).where(
@@ -272,6 +276,8 @@ class SqlAlchemyEntryRepository:
         )
         if kind is not None:
             statement = statement.where(EntryRow.kind == kind.value)
+        if candidate_ids is not None:
+            statement = statement.where(EntryRow.id.in_(candidate_ids))
         statement = statement.order_by(distance).limit(limit)
         with database_session(self._sessions) as session:
             return [_to_entry(row) for row in session.scalars(statement)]

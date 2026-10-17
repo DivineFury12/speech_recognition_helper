@@ -21,6 +21,7 @@ const SUMMARY_KEY = 'assistant-summary-day'
 
 const STORAGE_KEY = 'assistant-chat-v2'
 const MAX_STORED = 100
+const MAX_TEXT_LENGTH = 1000
 
 interface Persisted {
   messages: ChatMessage[]
@@ -126,6 +127,13 @@ export const useChatStore = defineStore('chat', () => {
   function sendText(text: string) {
     const t = text.trim()
     if (!t || sending.value) return
+    if (t.length > MAX_TEXT_LENGTH) {
+      messages.value.push({
+        id: localId(), role: 'error',
+        text: `Сообщение слишком длинное: максимум ${MAX_TEXT_LENGTH} символов.`,
+      })
+      return
+    }
     const request_id = crypto.randomUUID()
     return run({ text: t }, (conversation_id) => sendTextMessage({ text: t, timezone, conversation_id, request_id }))
   }

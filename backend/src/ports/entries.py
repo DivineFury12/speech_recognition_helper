@@ -44,12 +44,14 @@ class EntryRepository(typing.Protocol):
 
     def search_text(
         self, query: str, *, kind: EntryKind | None = None, limit: int = 5,
+        candidate_ids: set[uuid.UUID] | None = None,
     ) -> list[Entry]: ...
 
     def search_similar(
         self, embedding: list[float], *, embedding_model: str,
         kind: EntryKind | None = None, limit: int = 5,
         min_similarity: float = 0.0,
+        candidate_ids: set[uuid.UUID] | None = None,
     ) -> list[Entry]: ...
 
     def list_unindexed(self, embedding_model: str, *, limit: int = 100) -> list[tuple[uuid.UUID, str]]: ...

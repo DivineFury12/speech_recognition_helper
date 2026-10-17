@@ -8,6 +8,7 @@ from src.ports.conversations import ConversationState
 from src.schemas.assistant import AssistantIntent, AssistantStatus, Entry, EntryKind, EntryStatus
 from src.schemas.assistant_command import AssistantCommand
 from src.schemas.dialogue import PendingReply, PendingStep, ReplyAct, ScheduleRole
+from src.services import assistant as assistant_module
 from src.services.assistant import AssistantService
 from src.services.dialogue_interpreter import DialogueInterpreter
 from src.services.entries import EntryService
@@ -78,16 +79,18 @@ class FakeRepository:
                 and (kind is None or entry.kind == kind)
                 and (status is None or entry.status == status)]
 
-    def search_text(self, query, *, kind=None, limit=5):
+    def search_text(self, query, *, kind=None, limit=5, candidate_ids=None):
         return [entry for entry in self.items if query.lower() in entry.title.lower()
-                and (kind is None or entry.kind == kind)][:limit]
+                and (kind is None or entry.kind == kind)
+                and (candidate_ids is None or entry.id in candidate_ids)][:limit]
 
     def search_similar(self, embedding, *, embedding_model, kind=None, limit=5,
-                       min_similarity=0.0):
+                       min_similarity=0.0, candidate_ids=None):
         scored = []
         for entry in self.items:
             stored = self.embeddings.get((entry.id, embedding_model))
-            if stored is None or (kind is not None and entry.kind != kind):
+            if (stored is None or (kind is not None and entry.kind != kind)
+                    or (candidate_ids is not None and entry.id not in candidate_ids)):
                 continue
             similarity = sum(a * b for a, b in zip(embedding, stored)) / (
                 math.sqrt(sum(a * a for a in embedding))
@@ -174,6 +177,124 @@ class FakeConversations:
 
 
 class EntryFlowTests(unittest.TestCase):
+    def test_explicit_past_meeting_requires_confirmation(self):
+        repository = FakeRepository()
+        entries = EntryService(repository)
+        command = AssistantCommand(
+            action=AssistantIntent.create_entry, kind=EntryKind.meeting,
+            title='Встреча с Иваном', date=datetime.date(2026, 10, 4), time='16:00',
+        )
+        service = AssistantService(FakeExtractor(command), entries, FakeConversations())
+        token = assistant_module._now.set(datetime.datetime(2026, 10, 17, 12, 0))
+        try:
+            asked = service.handle_message(
+                'Создай встречу с Иваном 04.10.2026 в 16:00', 'Europe/Moscow', None,
+            )
+            self.assertEqual(asked.status, AssistantStatus.needs_clarification)
+            self.assertEqual(repository.items, [])
+            confirmed = service.handle_message('да', 'Europe/Moscow', asked.conversation_id)
+            self.assertEqual(confirmed.status, AssistantStatus.completed)
+            self.assertEqual(confirmed.entries[0].date, datetime.date(2026, 10, 4))
+        finally:
+            assistant_module._now.reset(token)
+
+    def test_month_reply_completes_pending_list_even_if_classifier_is_unclear(self):
+        today = datetime.date(2026, 10, 17)
+        repository = FakeRepository()
+        entries = EntryService(repository)
+        reminder = entries.create(
+            kind=EntryKind.reminder, title='Позвонить Ивану',
+            date=today.replace(day=18), time='10:00', timezone='Europe/Moscow',
+        )
+        extractor = ReplyExtractor([
+            AssistantCommand(action=AssistantIntent.list_entries, kind=EntryKind.reminder),
+            AssistantCommand(action=AssistantIntent.unknown),
+        ], [PendingReply(act=ReplyAct.unclear)])
+        service = AssistantService(extractor, entries, FakeConversations())
+        token = assistant_module._now.set(datetime.datetime(2026, 10, 17, 12, 0))
+        try:
+            asked = service.handle_message('Покажи напоминания', 'Europe/Moscow', None)
+            self.assertEqual(asked.status, AssistantStatus.needs_clarification)
+            result = service.handle_message('за октябрь', 'Europe/Moscow', asked.conversation_id)
+            self.assertEqual(result.status, AssistantStatus.completed)
+            self.assertIn(reminder.id, [entry.id for entry in result.entries])
+        finally:
+            assistant_module._now.reset(token)
+
+    def test_second_meeting_copies_saved_fields_and_overrides_time(self):
+        today = datetime.datetime.now(ZoneInfo('Europe/Moscow')).date()
+        repository = FakeRepository()
+        entries = EntryService(repository)
+        extractor = FakeExtractor([
+            AssistantCommand(
+                action=AssistantIntent.create_entry, kind=EntryKind.meeting,
+                title='Встреча с Максимом', date=today + datetime.timedelta(days=1),
+                time='10:00',
+            ),
+            AssistantCommand(
+                action=AssistantIntent.create_entry, kind=EntryKind.meeting,
+                time='17:00', source_reference_phrase='с данными из прошлого сообщения',
+            ),
+        ])
+        service = AssistantService(extractor, entries, FakeConversations())
+        first = service.handle_message(
+            'Создай встречу с Максимом завтра в 10:00', 'Europe/Moscow', None,
+        )
+        second = service.handle_message(
+            'Сделай ещё одну встречу с данными из прошлого сообщения, но только на 17 часов',
+            'Europe/Moscow', first.conversation_id,
+        )
+        self.assertEqual(second.status, AssistantStatus.completed)
+        self.assertEqual(second.entries[0].title, first.entries[0].title)
+        self.assertEqual(second.entries[0].date, first.entries[0].date)
+        self.assertEqual(second.entries[0].time, '17:00')
+        self.assertNotEqual(second.entries[0].id, first.entries[0].id)
+
+    def test_topic_search_is_limited_to_period_and_kind(self):
+        repository = FakeRepository()
+        entries = EntryService(repository, SearchTestEmbedder())
+        october_reminder = entries.create(
+            kind=EntryKind.reminder, title='Поход к врачу',
+            date=datetime.date(2026, 10, 18), time='10:00', timezone='Europe/Moscow',
+        )
+        entries.create(
+            kind=EntryKind.reminder, title='Поход к врачу в ноябре',
+            date=datetime.date(2026, 11, 18), time='10:00', timezone='Europe/Moscow',
+        )
+        entries.create(
+            kind=EntryKind.task, title='Поход к врачу',
+            date=datetime.date(2026, 10, 20), time=None, timezone='Europe/Moscow',
+        )
+        matches = entries.search(
+            'врач', kind=EntryKind.reminder,
+            date_from=datetime.date(2026, 10, 1), date_to=datetime.date(2026, 10, 31),
+        )
+        self.assertEqual([entry.id for entry in matches], [october_reminder.id])
+
+    def test_topic_search_checks_semantic_candidates(self):
+        class RelevanceExtractor(FakeExtractor):
+            def classify_relevant_entries(self, query, candidates):
+                self.assert_query = query
+                return [entry for entry in candidates if entry.title == 'Поход к врачу']
+
+        repository = FakeRepository()
+        entries = EntryService(repository, FakeEmbedder())
+        for title in ('Поход к врачу', 'Встреча с Максимом', 'Просмотр фильмов'):
+            entries.create(
+                kind=EntryKind.task, title=title, date=datetime.date(2026, 10, 20),
+                time=None, timezone='Europe/Moscow',
+            )
+        extractor = RelevanceExtractor(AssistantCommand(
+            action=AssistantIntent.search_entries, query='здоровье',
+            date_from=datetime.date(2026, 10, 1),
+            date_to=datetime.date(2026, 10, 31),
+        ))
+        turn = AssistantService(extractor, entries, FakeConversations()).handle_message(
+            'Покажи записи, связанные со здоровьем, за октябрь', 'Europe/Moscow', None,
+        )
+        self.assertEqual(extractor.assert_query, 'здоровье')
+        self.assertEqual([entry.title for entry in turn.entries], ['Поход к врачу'])
+
     def test_schedule_clarification_cannot_mutate_another_entry(self):
         today = datetime.datetime.now(ZoneInfo('Europe/Moscow')).date()
         repository = FakeRepository()
@@ -947,11 +1068,15 @@ class EntryFlowTests(unittest.TestCase):
             }),
         ])
         service = AssistantService(extractor, entries, conversations)
-        created = service.handle_message('Создай встречу с Иваном', 'Europe/Moscow', None)
-        moved = service.handle_message('Перенеси её на 16 октября', 'Europe/Moscow', created.conversation_id)
-        self.assertEqual(moved.status, AssistantStatus.completed)
-        self.assertEqual(moved.entries[0].date, datetime.date(2026, 10, 16))
-        self.assertEqual(moved.entries[0].time, '16:00')
+        token = assistant_module._now.set(datetime.datetime(2026, 10, 14, 12, 0))
+        try:
+            created = service.handle_message('Создай встречу с Иваном', 'Europe/Moscow', None)
+            moved = service.handle_message('Перенеси её на 16 октября', 'Europe/Moscow', created.conversation_id)
+            self.assertEqual(moved.status, AssistantStatus.completed)
+            self.assertEqual(moved.entries[0].date, datetime.date(2026, 10, 16))
+            self.assertEqual(moved.entries[0].time, '16:00')
+        finally:
+            assistant_module._now.reset(token)
 
     def test_delete_ambiguous_record_only_after_selection(self):
         repository = FakeRepository()
@@ -1192,17 +1317,21 @@ class EntryFlowTests(unittest.TestCase):
             {'action': 'list_entries', 'date_from': '2026-10-10', 'date_to': '2026-10-10'},
             {'action': 'search_entries', 'query': 'билеты'},
         ]
-        for payload, expected_intent in zip(commands, (
-            AssistantIntent.create_entry, AssistantIntent.list_entries,
-            AssistantIntent.search_entries,
-        )):
-            turn = AssistantService(entries=entries, extractor=FakeExtractor(
-                AssistantCommand.model_validate(payload),
-            )).handle_message('Запрос', 'Europe/Moscow', None)
-            self.assertEqual(turn.status, AssistantStatus.completed)
-            self.assertEqual(turn.intent, expected_intent)
-            self.assertEqual(len(turn.entries), 1)
-            self.assertEqual(turn.entries[0].title, 'Купить билеты')
+        token = assistant_module._now.set(datetime.datetime(2026, 10, 9, 12, 0))
+        try:
+            for payload, expected_intent in zip(commands, (
+                AssistantIntent.create_entry, AssistantIntent.list_entries,
+                AssistantIntent.search_entries,
+            )):
+                turn = AssistantService(entries=entries, extractor=FakeExtractor(
+                    AssistantCommand.model_validate(payload),
+                )).handle_message('Запрос', 'Europe/Moscow', None)
+                self.assertEqual(turn.status, AssistantStatus.completed)
+                self.assertEqual(turn.intent, expected_intent)
+                self.assertEqual(len(turn.entries), 1)
+                self.assertEqual(turn.entries[0].title, 'Купить билеты')
+        finally:
+            assistant_module._now.reset(token)
 
         self.assertEqual(len(repository.last_embedding), 384)
         self.assertEqual(entries.list_period(date, date, kind=EntryKind.task), repository.items)

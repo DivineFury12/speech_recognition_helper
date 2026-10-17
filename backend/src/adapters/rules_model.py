@@ -11,6 +11,7 @@ import logging
 import re
 
 from src.schemas.assistant_command import AssistantCommand
+from src.services.entries import EntryService
 from src.services.guards import yes_no
 from src.services.temporal import ambiguous_time_phrase, parse_date, parse_target_date, parse_time
 
@@ -147,6 +148,14 @@ class RulesModel:
     def complete_json(self, system_prompt: str, user_prompt: str, json_schema: dict) -> dict:
         data = json.loads(user_prompt)
         properties = json_schema.get('properties', {})
+        if 'relevant_numbers' in properties:
+            # Conservative fallback: accept only visible word overlap when the
+            # external model cannot judge semantic relevance.
+            topic = EntryService._search_stems(data.get('topic') or '')
+            return {'relevant_numbers': [
+                record['number'] for record in data.get('records', [])
+                if topic & EntryService._search_stems(record.get('title') or '')
+            ]}
         if 'decision' in properties:
             answer = yes_no(data.get('reply') or data.get('text') or '')
             return {'decision': answer or 'unclear'}

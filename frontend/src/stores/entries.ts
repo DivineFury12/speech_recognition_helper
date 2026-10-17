@@ -5,6 +5,7 @@ import type { Entry, EntryCreate, EntryUpdate } from '@/api/types'
 import { addDays, isoDate } from '@/utils/time'
 
 export type KindFilter = 'all' | Entry['kind']
+export type Period = 'today' | 'week' | 'month' | 'undated'
 
 export interface AgendaSection {
   id: string
@@ -33,8 +34,8 @@ function byTime(a: Entry, b: Entry): number {
   if (!b.time) return -1
   return a.time < b.time ? -1 : 1
 }
-
 export const useEntriesStore = defineStore('entries', () => {
+  const period = ref<Period>('week')
   const upcoming = ref<Entry[]>([])
   const overdue = ref<Entry[]>([])
   const undated = ref<Entry[]>([])
@@ -51,11 +52,21 @@ export const useEntriesStore = defineStore('entries', () => {
     error.value = null
     const now = new Date()
     const today = isoDate(now)
+    const selectedPeriod = period.value
     try {
       const [ahead, past, noDate] = await Promise.all([
-        listEntries({ date_from: today, date_to: isoDate(addDays(now, 7)) }),
-        listEntries({ date_from: isoDate(addDays(now, -30)), date_to: isoDate(addDays(now, -1)), status: 'pending' }),
-        listUndatedEntries(),
+        selectedPeriod === 'undated' ? Promise.resolve({ items: [] as Entry[] }) : listEntries({
+          date_from: selectedPeriod === 'month' ? isoDate(new Date(now.getFullYear(), now.getMonth(), 1)) : today,
+          date_to: selectedPeriod === 'today' ? today
+            : selectedPeriod === 'month' ? isoDate(new Date(now.getFullYear(), now.getMonth() + 1, 0))
+              : isoDate(addDays(now, 6)),
+        }),
+        selectedPeriod === 'today' || selectedPeriod === 'week'
+          ? listEntries({ date_from: isoDate(addDays(now, -30)), date_to: isoDate(addDays(now, -1)), status: 'pending' })
+          : Promise.resolve({ items: [] as Entry[] }),
+        selectedPeriod === 'week' || selectedPeriod === 'undated'
+          ? listUndatedEntries()
+          : Promise.resolve({ items: [] as Entry[] }),
       ])
       if (id !== reqId) return
       upcoming.value = ahead.items
@@ -84,13 +95,13 @@ export const useEntriesStore = defineStore('entries', () => {
       if (!e.date) continue
       byDay.set(e.date, [...(byDay.get(e.date) ?? []), e])
     }
-    if (!byDay.has(today)) byDay.set(today, [])
+    if ((period.value === 'today' || period.value === 'week') && !byDay.has(today)) byDay.set(today, [])
     for (const date of [...byDay.keys()].sort()) {
       const { title, hint } = dayTitle(date, today, tomorrow)
       result.push({ id: date, title, hint, items: byDay.get(date)!.sort(byTime) })
     }
     const free = undated.value.filter(visible)
-    if (free.length) result.push({ id: 'undated', title: 'Без срока', items: free.sort(byTime) })
+    if (free.length || period.value === 'undated') result.push({ id: 'undated', title: 'Без срока', items: free.sort(byTime) })
     return result
   })
 
@@ -118,5 +129,15 @@ export const useEntriesStore = defineStore('entries', () => {
   const create = (body: EntryCreate) => act(() => createEntry(body))
   const remove = (entry: Entry) => act(() => deleteEntry(entry.id))
 
-  return { sections, counts, loading, loaded, error, kind, showDone, refresh, toggleDone, save, create, remove }
+  function setPeriod(next: Period) {
+    if (period.value === next) return
+    period.value = next
+    loaded.value = false
+    upcoming.value = []
+    overdue.value = []
+    undated.value = []
+    void refresh()
+  }
+
+  return { period, sections, counts, loading, loaded, error, kind, showDone, refresh, setPeriod, toggleDone, save, create, remove }
 })

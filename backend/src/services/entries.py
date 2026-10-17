@@ -136,6 +136,7 @@ class EntryService:
 
     def _text_candidates(
         self, query: str, *, kind: EntryKind | None, limit: int,
+        candidate_ids: set[uuid.UUID] | None = None,
     ) -> tuple[list[Entry], bool]:
         normalized = ' '.join(query.split())
         variants = [normalized]
@@ -150,13 +151,17 @@ class EntryService:
         if not stems:
             return [], False
         for variant in variants:
-            exact = self._repository.search_text(variant, kind=kind, limit=limit)
+            exact = self._repository.search_text(
+                variant, kind=kind, limit=limit, candidate_ids=candidate_ids,
+            )
             if exact:
                 return exact, True
 
         candidates: dict[uuid.UUID, Entry] = {}
         for stem in stems:
-            for entry in self._repository.search_text(stem, kind=kind, limit=max(25, limit * 5)):
+            for entry in self._repository.search_text(
+                stem, kind=kind, limit=max(25, limit * 5), candidate_ids=candidate_ids,
+            ):
                 title_stems = self._search_stems(entry.title)
                 if stem in title_stems:
                     candidates[entry.id] = entry
@@ -169,6 +174,7 @@ class EntryService:
 
     def _semantic_candidates(
         self, query: str, *, kind: EntryKind | None, limit: int,
+        candidate_ids: set[uuid.UUID] | None = None,
     ) -> list[Entry]:
         if not self._search_stems(query):
             return []
@@ -179,6 +185,7 @@ class EntryService:
         return self._repository.search_similar(
             vector, embedding_model=self._embedder.name, kind=kind,
             limit=limit, min_similarity=minimum,
+            candidate_ids=candidate_ids,
         )
 
     def create(
@@ -223,10 +230,27 @@ class EntryService:
     ) -> list[Entry]:
         return self._repository.list_period(date_from, date_to, kind=kind, status=status)
 
-    def search(self, query: str, *, kind: EntryKind | None = None, limit: int = 5) -> list[Entry]:
+    def search(
+        self, query: str, *, kind: EntryKind | None = None, limit: int = 5,
+        date_from: datetime.date | None = None, date_to: datetime.date | None = None,
+    ) -> list[Entry]:
         query = query.strip()
         if not query or limit <= 0:
             return []
+        if date_from is not None and date_to is not None:
+            eligible = self.list_period(date_from, date_to, kind=kind)
+            candidate_ids = {entry.id for entry in eligible}
+            if not candidate_ids:
+                return []
+            matches, _ = self._text_candidates(
+                query, kind=kind, limit=len(candidate_ids), candidate_ids=candidate_ids,
+            )
+            if not matches:
+                matches = self._semantic_candidates(
+                    query, kind=kind, limit=len(candidate_ids), candidate_ids=candidate_ids,
+                )
+            matched_ids = {entry.id for entry in matches}
+            return [entry for entry in eligible if entry.id in matched_ids]
         matches, _ = self._text_candidates(query, kind=kind, limit=limit)
         return matches if matches else self._semantic_candidates(query, kind=kind, limit=limit)
 

@@ -16,6 +16,8 @@ const { voiceEnabled } = storeToRefs(useSessionStore())
 const draft = ref('')
 const editor = useEditor()
 const EXAMPLES = ['Что у меня сегодня?', 'Напомни завтра в 10:00 позвонить Ивану', 'Поставь встречу с командой в пятницу в 15:00']
+const MAX_TEXT_LENGTH = 1000
+const tooLong = computed(() => draft.value.trim().length > MAX_TEXT_LENGTH)
 const listEl = ref<HTMLElement | null>(null)
 const inputEl = ref<HTMLTextAreaElement | null>(null)
 
@@ -50,6 +52,7 @@ function primary() {
     return
   }
   if (hasText.value) {
+    if (tooLong.value) return
     void chat.sendText(draft.value)
     draft.value = ''
     return
@@ -148,12 +151,15 @@ watch(
       <button type="button" class="link" @click="chat.retry()">Повторить</button>
     </div>
     <div v-if="recError" class="banner error">{{ recError }}</div>
-    <div v-if="awaiting" class="banner info">
+    <div v-if="awaiting && !retryLast" class="banner info">
       Ассистент ждёт ответа на уточнение.
       <button type="button" class="link" @click="chat.reset()">Начать заново</button>
     </div>
     <div v-else-if="messages.length && !sending" class="toolbar">
       <button type="button" class="link muted" @click="chat.reset()">Очистить чат</button>
+    </div>
+    <div v-if="tooLong" class="banner error" role="alert">
+      Сообщение слишком длинное: {{ draft.trim().length }} из {{ MAX_TEXT_LENGTH }} символов. Сократите его перед отправкой.
     </div>
 
     <form class="composer" @submit.prevent="primary">
@@ -180,7 +186,7 @@ watch(
         type="submit"
         class="round-btn"
         :class="{ recording: isRecording, busy: sending }"
-        :disabled="sending || (mode === 'mic' && !recorder.supported) || (!voiceEnabled && !hasText)"
+        :disabled="sending || tooLong || (mode === 'mic' && !recorder.supported) || (!voiceEnabled && !hasText)"
         :aria-label="actionLabel"
         :title="mode === 'mic' && !recorder.supported ? 'Браузер не поддерживает запись' : actionLabel"
       >

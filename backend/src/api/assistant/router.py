@@ -77,6 +77,11 @@ def send_audio_message(
     text = transcription.transribe(file.file, file.filename).strip()
     if not text:
         raise fastapi.HTTPException(status_code=400, detail='Речь не распознана')
+    if len(text) > src.schemas.assistant.MAX_ASSISTANT_TEXT_LENGTH:
+        raise fastapi.HTTPException(
+            status_code=413,
+            detail=f'Распознанный текст слишком длинный: максимум {src.schemas.assistant.MAX_ASSISTANT_TEXT_LENGTH} символов',
+        )
     return assistant.handle_message(
         text=text,
         timezone=timezone,

@@ -1,12 +1,12 @@
 <script setup lang="ts">
 import { onBeforeUnmount, onMounted } from 'vue'
 import { storeToRefs } from 'pinia'
-import { useEntriesStore, type KindFilter } from '@/stores/entries'
+import { useEntriesStore, type KindFilter, type Period } from '@/stores/entries'
 import { useEditor } from '@/composables/useEditor'
 import EntryCard from './EntryCard.vue'
 
 const store = useEntriesStore()
-const { sections, counts, loading, loaded, error, kind, showDone } = storeToRefs(store)
+const { period, sections, counts, loading, loaded, error, kind, showDone } = storeToRefs(store)
 const editor = useEditor()
 
 const FILTERS: { id: KindFilter; label: string }[] = [
@@ -14,6 +14,12 @@ const FILTERS: { id: KindFilter; label: string }[] = [
   { id: 'task', label: 'Задачи' },
   { id: 'meeting', label: 'Встречи' },
   { id: 'reminder', label: 'Напоминания' },
+]
+const PERIODS: { id: Period; label: string }[] = [
+  { id: 'today', label: 'Сегодня' },
+  { id: 'week', label: 'На неделю' },
+  { id: 'month', label: 'Месяц' },
+  { id: 'undated', label: 'Без срока' },
 ]
 
 const REFRESH_MS = 60_000
@@ -43,7 +49,20 @@ onBeforeUnmount(() => window.clearInterval(timer))
       </button>
     </header>
 
-    <div class="filters" role="toolbar" aria-label="Фильтр">
+    <div class="filters" role="toolbar" aria-label="Период">
+      <button
+        v-for="p in PERIODS"
+        :key="p.id"
+        type="button"
+        class="filter-chip"
+        :class="{ active: period === p.id }"
+        :aria-pressed="period === p.id"
+        @click="store.setPeriod(p.id)"
+      >
+        {{ p.label }}
+      </button>
+    </div>
+    <div class="filters" role="toolbar" aria-label="Тип записи">
       <button
         v-for="f in FILTERS"
         :key="f.id"
@@ -89,9 +108,10 @@ onBeforeUnmount(() => window.clearInterval(timer))
               <circle cx="32" cy="32" r="22" fill="none" stroke="currentColor" stroke-width="3" opacity="0.35" />
               <path d="M22 33l7 7 14-15" fill="none" stroke="currentColor" stroke-width="4" stroke-linecap="round" stroke-linejoin="round" />
             </svg>
-            <span>Свободный день. Скажите «Поставь встречу…» или нажмите +</span>
+            <span>{{ s.id === 'undated' ? 'Записей без срока нет' : 'Свободный день. Скажите «Поставь встречу…» или нажмите +' }}</span>
           </div>
         </section>
+        <p v-if="!sections.length" class="day-empty">За выбранный период записей нет</p>
       </template>
     </div>
   </section>

@@ -49,7 +49,7 @@ async function send(path: string, init: RequestInit = {}, timeoutMs = DEFAULT_TI
     if (e instanceof DOMException && e.name === 'TimeoutError') {
       throw new ApiError('Сервер не ответил вовремя. Попробуйте ещё раз.', null)
     }
-    throw new ApiError('Нет связи с сервером. Проверьте сеть и что backend запущен.', null)
+    throw new ApiError('Не удалось связаться с сервером. Повторите запрос позже.', null)
   }
   if (!res.ok) {
     let detail = `Ошибка сервера (${res.status})`

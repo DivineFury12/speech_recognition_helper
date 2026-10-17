@@ -5,6 +5,8 @@ import uuid
 
 import pydantic
 
+MAX_ASSISTANT_TEXT_LENGTH = 1000
+
 
 class EntryKind(str, enum.Enum):
     task = 'task'
@@ -122,7 +124,7 @@ class EntryCreate(pydantic.BaseModel):
 
 
 class TextMessageRequest(pydantic.BaseModel):
-    text: str = pydantic.Field(min_length=1, max_length=1000)
+    text: str = pydantic.Field(min_length=1, max_length=MAX_ASSISTANT_TEXT_LENGTH)
     timezone: str = pydantic.Field(min_length=1)
     conversation_id: uuid.UUID | None = None
     request_id: uuid.UUID | None = None

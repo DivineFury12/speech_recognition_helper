@@ -347,6 +347,8 @@ paths:
                 $ref: '#/components/schemas/AssistantTurn'
         '400':
           $ref: '#/components/responses/BadRequest'
+        '413':
+          description: Распознанный текст превышает 1000 символов
         '422':
           $ref: '#/components/responses/ValidationError'
         '409':

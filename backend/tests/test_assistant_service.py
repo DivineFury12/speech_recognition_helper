@@ -10,6 +10,7 @@ from src.schemas.assistant import AssistantIntent, AssistantStatus, Conversation
 from src.schemas.assistant_command import AssistantCommand
 from src.schemas.dialogue import (DialogueTransition, PendingReply, PendingStep,
                                   ReplyAct, transition_for_reply)
+from src.services import assistant as assistant_module
 from src.services.assistant import AssistantService, InvalidTimezoneError
 from src.services.command_extractor import ExternalCommandExtractor, InvalidModelResponseError
 from src.services.temporal import (ambiguous_time_options, parse_date, parse_duration,
@@ -265,6 +266,106 @@ class AssistantServiceTests(unittest.TestCase):
             datetime.date(2026, 10, 11), datetime.date(2026, 10, 11),
         ))
 
+    def test_periods_from_manual_scenarios(self):
+        today = datetime.date(2026, 10, 17)
+        expected = {
+            'Какие есть напоминания на октябрь?': (datetime.date(2026, 10, 1),
+                                                    datetime.date(2026, 10, 31)),
+            'за окт.': (datetime.date(2026, 10, 1), datetime.date(2026, 10, 31)),
+            'за 11  октября': (datetime.date(2026, 10, 11), datetime.date(2026, 10, 11)),
+            'с 01.10 по 31.10': (datetime.date(2026, 10, 1), datetime.date(2026, 10, 31)),
+            'за осень': (datetime.date(2026, 9, 1), datetime.date(2026, 11, 30)),
+            'в этом месяце': (datetime.date(2026, 10, 1), datetime.date(2026, 10, 31)),
+            'на следующий месяц': (datetime.date(2026, 11, 1), datetime.date(2026, 11, 30)),
+            'какие встречи есть на ближайшую неделю': (today, datetime.date(2026, 10, 23)),
+            'события во второй половине следующей недели':
+                (datetime.date(2026, 10, 22), datetime.date(2026, 10, 25)),
+            'события за следующую неделю':
+                (datetime.date(2026, 10, 19), datetime.date(2026, 10, 25)),
+        }
+        for phrase, period in expected.items():
+            with self.subTest(phrase=phrase):
+                self.assertEqual(parse_period(phrase, today), period)
+
+    def test_model_cannot_invent_period_or_topic(self):
+        today = datetime.date(2026, 10, 17)
+        client = FakeModelClient([
+            {'action': 'search_entries', 'query': 'здоровье',
+             'date_from': '2027-10-01', 'date_to': '2027-10-31'},
+            {'action': 'list_entries', 'query': 'здоровье',
+             'date_from': '2027-10-01', 'date_to': '2027-10-31'},
+            {'action': 'search_entries', 'query': 'несуществующее',
+             'date_from': '2027-10-01', 'date_to': '2027-10-31'},
+        ])
+        extractor = ExternalCommandExtractor(client)
+        for action in (AssistantIntent.search_entries, AssistantIntent.list_entries):
+            command = extractor.extract(
+                'Выведи события, связанные со здоровьем, за октябрь', 'Europe/Moscow', today,
+            )
+            self.assertEqual(command.action, action)
+            self.assertEqual(command.query, 'здоровье')
+            self.assertEqual((command.date_from, command.date_to),
+                             (datetime.date(2026, 10, 1), datetime.date(2026, 10, 31)))
+        invalid = extractor.extract('Какие напоминания на октябрь?', 'Europe/Moscow', today)
+        self.assertIsNone(invalid.query)
+        self.assertEqual(invalid.kind, EntryKind.reminder)
+
+    def test_kind_and_month_are_not_a_search_topic(self):
+        client = FakeModelClient({
+            'action': 'search_entries', 'kind': 'reminder',
+            'query': 'напоминания на октябрь',
+        })
+        command = ExternalCommandExtractor(client).extract(
+            'Какие есть напоминания на октябрь?', 'Europe/Moscow',
+            datetime.date(2026, 10, 17),
+        )
+        self.assertIsNone(command.query)
+        self.assertEqual(command.kind, EntryKind.reminder)
+        self.assertEqual((command.date_from, command.date_to),
+                         (datetime.date(2026, 10, 1), datetime.date(2026, 10, 31)))
+        client.payload = {'action': 'search_entries', 'query': 'осень'}
+        command = ExternalCommandExtractor(client).extract(
+            'Покажи события за осень', 'Europe/Moscow', datetime.date(2026, 10, 17),
+        )
+        self.assertIsNone(command.query)
+        self.assertEqual((command.date_from, command.date_to),
+                         (datetime.date(2026, 9, 1), datetime.date(2026, 11, 30)))
+
+    def test_search_relevance_selection_is_bounded_to_candidates(self):
+        entries = [Entry(
+            id=uuid.uuid4(), kind=EntryKind.task, title=title, date=None,
+            time=None, timezone='Europe/Moscow', status=EntryStatus.pending,
+            created_at=datetime.datetime.now(datetime.timezone.utc),
+        ) for title in ('Поход к врачу', 'Встреча с Максимом', 'Просмотр фильмов')]
+        client = FakeModelClient({'relevant_numbers': [1]})
+        extractor = ExternalCommandExtractor(client)
+        self.assertEqual(extractor.classify_relevant_entries('здоровье', entries), entries[:1])
+        client.payload = {'relevant_numbers': [4]}
+        with self.assertRaises(InvalidModelResponseError):
+            extractor.classify_relevant_entries('здоровье', entries)
+
+    def test_copy_reference_must_be_in_current_message(self):
+        client = FakeModelClient({
+            'action': 'create_entry', 'kind': 'meeting', 'title': None,
+            'time': '17:00', 'time_phrase': 'на 17 часов',
+            'source_reference_phrase': 'с данными из прошлого сообщения',
+        })
+        extractor = ExternalCommandExtractor(client)
+        command = extractor.extract(
+            'Сделай ещё одну встречу с данными из прошлого сообщения, но только на 17 часов',
+            'Europe/Moscow', datetime.date(2026, 10, 17),
+        )
+        self.assertEqual(command.source_reference_phrase, 'с данными из прошлого сообщения')
+        self.assertEqual(command.time, '17:00')
+        client.payload = {
+            'action': 'create_entry', 'kind': 'meeting',
+            'source_reference_phrase': 'из прошлого сообщения',
+        }
+        ungrounded = extractor.extract(
+            'Создай встречу с Петром завтра', 'Europe/Moscow', datetime.date(2026, 10, 17),
+        )
+        self.assertIsNone(ungrounded.source_reference_phrase)
+
     def test_meeting_duration_is_read_from_user_words(self):
         today = datetime.date(2026, 10, 14)
         client = FakeModelClient({
@@ -283,6 +384,29 @@ class AssistantServiceTests(unittest.TestCase):
         self.assertEqual(parse_duration('Перенеси её на 12:00 и сократи до 45 минут', for_update=True), 45)
         self.assertEqual(parse_duration('Сократи её до 30 минут', for_update=True), 30)
         self.assertIsNone(parse_duration('Перенеси её на час', for_update=True))
+
+    def test_clock_time_is_not_also_meeting_duration(self):
+        client = FakeModelClient({
+            'action': 'create_entry', 'kind': 'meeting',
+            'time': '17:00', 'time_phrase': 'на 17 часов',
+            'duration_minutes': 1020, 'duration_phrase': None,
+        })
+        extractor = ExternalCommandExtractor(client)
+        command = extractor.extract(
+            'Сделай ещё одну встречу на 17 часов', 'Europe/Moscow',
+            datetime.date(2026, 10, 17),
+        )
+        self.assertEqual(command.time, '17:00')
+        self.assertIsNone(command.duration_minutes)
+        client.payload = {
+            'action': 'create_entry', 'kind': 'meeting',
+            'time': '17:00', 'time_phrase': 'на 17 часов',
+        }
+        command = extractor.extract(
+            'Сделай встречу на 17 часов длительностью два часа',
+            'Europe/Moscow', datetime.date(2026, 10, 17),
+        )
+        self.assertEqual(command.duration_minutes, 120)
 
     def test_old_record_date_can_be_in_previous_week(self):
         today = datetime.date(2026, 10, 14)
@@ -340,21 +464,24 @@ class AssistantServiceTests(unittest.TestCase):
         entries = FakeEntries()
         conversations = FakeConversations()
         service = AssistantService(extractor, entries, conversations)
+        token = assistant_module._now.set(datetime.datetime(2026, 10, 15, 12, 0))
+        try:
+            first = service.handle_message(
+                'В пятницу напомни сделать тренировку', 'Europe/Moscow', None,
+            )
+            self.assertEqual(first.status, AssistantStatus.needs_clarification)
+            self.assertEqual(entries.created, [])
+            self.assertIsNotNone(conversations.get(first.conversation_id).pending_command)
 
-        first = service.handle_message(
-            'В пятницу напомни сделать тренировку', 'Europe/Moscow', None,
-        )
-        self.assertEqual(first.status, AssistantStatus.needs_clarification)
-        self.assertEqual(entries.created, [])
-        self.assertIsNotNone(conversations.get(first.conversation_id).pending_command)
-
-        second = service.handle_message('В 18:00', 'Europe/Moscow', first.conversation_id)
-        self.assertEqual(second.status, AssistantStatus.completed)
-        self.assertEqual(len(entries.created), 1)
-        self.assertEqual(entries.created[0][3], '18:00')
-        self.assertIsNone(conversations.get(first.conversation_id).pending_command)
-        self.assertEqual(len(conversations.list_messages(first.conversation_id)), 4)
-        self.assertIsNotNone(extractor.calls[1][3])
+            second = service.handle_message('В 18:00', 'Europe/Moscow', first.conversation_id)
+            self.assertEqual(second.status, AssistantStatus.completed)
+            self.assertEqual(len(entries.created), 1)
+            self.assertEqual(entries.created[0][3], '18:00')
+            self.assertIsNone(conversations.get(first.conversation_id).pending_command)
+            self.assertEqual(len(conversations.list_messages(first.conversation_id)), 4)
+            self.assertIsNotNone(extractor.calls[1][3])
+        finally:
+            assistant_module._now.reset(token)
 
     def test_pending_command_can_be_cancelled(self):
         extractor = FakeExtractor(AssistantCommand.model_validate({

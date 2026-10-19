@@ -138,6 +138,13 @@ class TextMessageRequest(pydantic.BaseModel):
         return value
 
 
+class AssistantResponse(pydantic.BaseModel):
+    text: str
+    status: AssistantStatus
+    entries: list[Entry]
+    suggestions: list[str] = pydantic.Field(default_factory=list)
+
+
 class AssistantTurn(pydantic.BaseModel):
     conversation_id: uuid.UUID
     turn_id: uuid.UUID
@@ -149,6 +156,10 @@ class AssistantTurn(pydantic.BaseModel):
     entries: list[Entry]
     suggestions: list[str] = pydantic.Field(
         default_factory=list, description='Короткие ответы для кнопок под сообщением',
+    )
+    responses: list[AssistantResponse] = pydantic.Field(
+        default_factory=list,
+        description='Отдельные ответы при обработке нескольких действий одним запросом',
     )
 
 

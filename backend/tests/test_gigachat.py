@@ -101,6 +101,34 @@ class GigaChatClientTests(unittest.TestCase):
         finally:
             http_client.close()
 
+    def test_retries_one_malformed_structured_response(self):
+        completions = 0
+
+        def handle(request):
+            nonlocal completions
+            if request.url.path == '/api/v2/oauth':
+                return httpx.Response(200, json={
+                    'access_token': 'token', 'expires_at': time.time() + 1800,
+                })
+            completions += 1
+            content = 'not json' if completions == 1 else '{"parts":["one","two"]}'
+            return httpx.Response(200, json={
+                'choices': [{'message': {'content': content}}],
+            })
+
+        http_client = httpx.Client(transport=httpx.MockTransport(handle))
+        client = GigaChatClient(
+            auth_key='secret-key', scope='GIGACHAT_API_PERS', model='GigaChat-2',
+            http_client=http_client,
+        )
+        try:
+            with mock.patch('src.adapters.gigachat.time.sleep'):
+                self.assertEqual(client.complete_json('system', 'user', {'type': 'object'}),
+                                 {'parts': ['one', 'two']})
+            self.assertEqual(completions, 2)
+        finally:
+            http_client.close()
+
     def test_retries_transient_completion_disconnect(self):
         completions = 0
 

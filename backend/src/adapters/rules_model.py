@@ -148,6 +148,8 @@ class RulesModel:
     def complete_json(self, system_prompt: str, user_prompt: str, json_schema: dict) -> dict:
         data = json.loads(user_prompt)
         properties = json_schema.get('properties', {})
+        if 'parts' in properties:
+            return {'parts': [data.get('text', '')]}
         if 'relevant_numbers' in properties:
             # Conservative fallback: accept only visible word overlap when the
             # external model cannot judge semantic relevance.
@@ -179,9 +181,11 @@ class FallbackModel:
     def complete_json(self, *args, **kwargs) -> dict:
         try:
             result = self._primary.complete_json(*args, **kwargs)
-        except Exception:
+        except Exception as exc:
             self.healthy = False
-            logger.warning('GigaChat недоступен, разбираю команду правилами', exc_info=True)
+            cause = exc.__cause__ or exc
+            logger.warning('GigaChat недоступен (%s), разбираю команду правилами',
+                           type(cause).__name__)
             return self._fallback.complete_json(*args, **kwargs)
         self.healthy = True
         return result

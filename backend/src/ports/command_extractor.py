@@ -23,5 +23,6 @@ class CommandExtractor(typing.Protocol):
         self, text: str, *, step: PendingStep, action: AssistantIntent,
         question: str | None, candidates: list[dict] | None = None,
         pending: AssistantCommand | None = None,
+        history: list[dict[str, str]] | None = None,
     ) -> PendingReply:
         ...

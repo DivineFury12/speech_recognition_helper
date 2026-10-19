@@ -120,6 +120,11 @@ class GigaChatClient:
                     time.sleep(0.4 * (attempt + 1))
                     continue
                 raise GigaChatAPIError('Не удалось связаться с GigaChat') from exc
+            except json.JSONDecodeError as exc:
+                if attempt < 1:
+                    time.sleep(0.4)
+                    continue
+                raise GigaChatAPIError('Не удалось получить корректный ответ GigaChat') from exc
             except (httpx.HTTPError, ValueError, KeyError, IndexError, TypeError) as exc:
                 raise GigaChatAPIError('Не удалось получить корректный ответ GigaChat') from exc
         raise GigaChatAPIError('Не удалось авторизовать запрос к GigaChat')

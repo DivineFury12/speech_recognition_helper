@@ -735,6 +735,23 @@ components:
           type: string
           format: uuid
           description: Один и тот же ID при повторе того же текстового запроса.
+    AssistantResponse:
+      type: object
+      required: [text, status, entries]
+      properties:
+        text:
+          type: string
+        status:
+          type: string
+          enum: [completed, needs_clarification, no_action]
+        entries:
+          type: array
+          items:
+            $ref: '#/components/schemas/Entry'
+        suggestions:
+          type: array
+          items:
+            type: string
     AssistantTurn:
       type: object
       required: [conversation_id, turn_id, user_text, assistant_text, status, intent, entries]
@@ -771,6 +788,11 @@ components:
           description: Короткие ответы для кнопок под сообщением («Да», «Нет», «Отмени последнее»).
           items:
             type: string
+        responses:
+          type: array
+          description: Отдельные ответы при обработке нескольких действий одним запросом.
+          items:
+            $ref: '#/components/schemas/AssistantResponse'
       example:
         conversation_id: 550e8400-e29b-41d4-a716-446655440000
         turn_id: 4e8d4cb6-bf66-453c-a92b-71c578889103

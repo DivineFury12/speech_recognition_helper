@@ -76,7 +76,11 @@ class DialogueInterpreter:
             return False
         return None
 
-    def _model_confirmation(self, text: str, title: str) -> bool | None:
+    def _model_confirmation(
+        self, text: str, proposal: str, *,
+        history: list[dict[str, str]] | None = None,
+        pending: AssistantCommand | None = None,
+    ) -> bool | None:
         if len(text) > 160 or len(text.split()) > 16 or re.search(
             r'\b(?:создай|создать|добавь|добавить|удали|удалить|перенеси|'
             r'перенести|измени|изменить|покажи|найди|отметь)\b',
@@ -87,13 +91,23 @@ class DialogueInterpreter:
         if not callable(classify):
             return None
         try:
-            decision = classify(text, title)
+            if history is None and pending is None:
+                decision = classify(text, proposal)
+            else:
+                decision = classify(text, proposal, history=history, pending=pending)
             if decision is True and re.search(r'\b(?:не|нет|ни)\b', text.casefold()):
                 return None
             return decision
         except Exception:
             logger.warning('Confirmation classifier unavailable', exc_info=True)
             return None
+
+    def confirmation(
+        self, text: str, proposal: str, *,
+        history: list[dict[str, str]] | None = None,
+        pending: AssistantCommand | None = None,
+    ) -> bool | None:
+        return self._model_confirmation(text, proposal, history=history, pending=pending)
 
     @classmethod
     def _grounded_candidate(
@@ -202,6 +216,8 @@ class DialogueInterpreter:
             reply = classify(
                 text, step=step, action=command.action,
                 question=question, candidates=candidates, pending=command,
+                history=[{'role': item.role, 'text': item.text}
+                         for item in state.messages],
             )
             if reply.act == ReplyAct.select:
                 if step == PendingStep.time_choice:
@@ -231,6 +247,8 @@ class DialogueInterpreter:
     def _independent_command(command: AssistantCommand, previous: AssistantCommand) -> bool:
         if command.action != AssistantIntent.create_entry:
             return False
+        if command.signals_verified and command.action_phrase is None:
+            return False
         if command.kind is None or command.title is None:
             return False
         if previous.action != AssistantIntent.create_entry:
@@ -239,6 +257,20 @@ class DialogueInterpreter:
             return True
         return (previous.title is not None
                 and command.title.casefold() != previous.title.casefold())
+
+    @staticmethod
+    def _fills_pending_field(command: AssistantCommand, previous: AssistantCommand) -> bool:
+        if command.action != previous.action:
+            return False
+        if previous.action == AssistantIntent.create_entry:
+            return any((getattr(previous, name) is None and getattr(command, name) is not None)
+                       for name in ('kind', 'title', 'date', 'time'))
+        if previous.action == AssistantIntent.update_entry:
+            return any((getattr(command, name) is not None)
+                       for name in ('date', 'time', 'new_title', 'duration_minutes'))
+        if previous.action in (AssistantIntent.list_entries, AssistantIntent.search_entries):
+            return bool(command.query or command.date_from and command.date_to)
+        return False
 
     @staticmethod
     def _task_fallback(text: str, today: datetime.date) -> AssistantCommand | None:
@@ -262,21 +294,30 @@ class DialogueInterpreter:
         state: ConversationState | None,
     ) -> DialoguePlan:
         previous = state.pending_command if state else None
+        history = ([{'role': item.role, 'text': item.text} for item in state.messages]
+                   if state else [])
         step = self.pending_step(previous) if previous is not None else None
         reply = self._classify(text, previous, state, today) if previous is not None else None
         transition = transition_for_reply(step, reply.act) if reply is not None else None
         preextracted = None
         task_fallback = self._task_fallback(text, today)
+        independent = None
 
-        # A bare, grounded schedule answers a schedule question even if the
-        # classifier says unclear. Full questions and commands are excluded.
-        if (previous is not None and reply is not None and reply.act == ReplyAct.unclear
-                and ((previous.selected_entry_id is not None and previous.move_intent)
-                     or (previous.action == AssistantIntent.create_entry
-                         and step == PendingStep.fields))
-                and replacement_schedule_reply(text, today) is not None):
-            reply = PendingReply(act=ReplyAct.continue_command)
-            transition = DialogueTransition.continue_command
+        if previous is not None and reply is not None and reply.act == ReplyAct.new_command:
+            try:
+                independent = self._extractor.extract(
+                    text=text, timezone=timezone, today=today, previous=None, history=history,
+                )
+                if (independent.action == AssistantIntent.create_entry
+                        and not self._independent_command(independent, previous)):
+                    reply = PendingReply(act=ReplyAct.unclear)
+                    transition = DialogueTransition.repeat_question
+                else:
+                    preextracted = independent
+            except Exception:
+                logger.warning('New command verification unavailable', exc_info=True)
+                reply = PendingReply(act=ReplyAct.unclear)
+                transition = DialogueTransition.repeat_question
 
         if (previous is not None and reply is not None and reply.act == ReplyAct.unclear
                 and previous.action in (AssistantIntent.list_entries, AssistantIntent.search_entries)
@@ -286,15 +327,42 @@ class DialogueInterpreter:
 
         if previous is not None and reply is not None and reply.act == ReplyAct.unclear:
             try:
-                independent = self._extractor.extract(
-                    text=text, timezone=timezone, today=today, previous=None, history=[],
-                )
+                if independent is None:
+                    independent = self._extractor.extract(
+                        text=text, timezone=timezone, today=today, previous=None,
+                        history=history,
+                    )
                 if self._independent_command(independent, previous):
                     reply = PendingReply(act=ReplyAct.new_command)
                     transition = DialogueTransition.new_command
                     preextracted = independent
             except Exception:
                 logger.warning('Independent command check unavailable', exc_info=True)
+            if (reply.act == ReplyAct.unclear
+                    and step in (PendingStep.fields, PendingStep.update_details)):
+                try:
+                    continuation = self._extractor.extract(
+                        text=text, timezone=timezone, today=today,
+                        previous=previous, history=history,
+                    )
+                    if self._fills_pending_field(continuation, previous):
+                        reply = PendingReply(act=ReplyAct.continue_command)
+                        transition = DialogueTransition.continue_command
+                        preextracted = continuation
+                except Exception as exc:
+                    logger.warning('Pending command extraction unavailable (%s)',
+                                   type(exc).__name__)
+            if (reply.act == ReplyAct.unclear and step in
+                    (PendingStep.fields, PendingStep.update_details)):
+                schedule = replacement_schedule_reply(text, today)
+                if schedule is not None:
+                    date, time, uncertain_time = schedule
+                    preextracted = AssistantCommand(
+                        action=previous.action, date=date, time=time,
+                        time_phrase=uncertain_time,
+                    )
+                    reply = PendingReply(act=ReplyAct.continue_command)
+                    transition = DialogueTransition.continue_command
 
         if previous is not None:
             if reply is None:

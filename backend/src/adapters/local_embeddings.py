@@ -1,10 +1,8 @@
 """Local CPU implementations of the text embedding contract."""
 
-import threading
+from __future__ import annotations
 
-import torch
-import torch.nn.functional as functional
-from transformers import AutoModel, AutoTokenizer, T5EncoderModel
+import threading
 
 from src.ports.embeddings import EmbeddingUnavailableError
 
@@ -30,6 +28,8 @@ class _TransformerEmbeddingModel:
         # The same instance may be called concurrently by FastAPI worker threads.
         with self._lock:
             try:
+                import torch
+                import torch.nn.functional as functional
                 if self._model is None:
                     self._load()
                 tokens = self._tokenizer(
@@ -52,6 +52,8 @@ class E5EmbeddingModel(_TransformerEmbeddingModel):
     dimensions = 384
 
     def _load(self) -> None:
+        from transformers import AutoModel, AutoTokenizer
+
         self._tokenizer = AutoTokenizer.from_pretrained(self.name, cache_dir=self._cache_dir)
         self._model = AutoModel.from_pretrained(self.name, cache_dir=self._cache_dir).to('cpu').eval()
 
@@ -73,6 +75,8 @@ class FridaEmbeddingModel(_TransformerEmbeddingModel):
     dimensions = 1536
 
     def _load(self) -> None:
+        from transformers import AutoTokenizer, T5EncoderModel
+
         self._tokenizer = AutoTokenizer.from_pretrained(self.name, cache_dir=self._cache_dir)
         self._model = T5EncoderModel.from_pretrained(self.name, cache_dir=self._cache_dir).to('cpu').eval()
 

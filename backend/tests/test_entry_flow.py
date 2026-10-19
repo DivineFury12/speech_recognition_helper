@@ -148,7 +148,7 @@ class ReplyExtractor(FakeExtractor):
         self.reply_context = []
 
     def classify_pending_reply(self, text, *, step, action, question, candidates=None,
-                               pending=None):
+                               pending=None, history=None):
         self.reply_context.append((text, step, action, question, candidates))
         return self.replies.pop(0)
 
@@ -177,6 +177,33 @@ class FakeConversations:
 
 
 class EntryFlowTests(unittest.TestCase):
+    def test_unverified_model_date_requires_confirmation_before_move(self):
+        repository = FakeRepository()
+        entries = EntryService(repository)
+        stored = entries.create(kind=EntryKind.reminder, title='Позвонить другу',
+                                date=datetime.date(2026, 10, 22), time='15:00',
+                                timezone='Europe/Moscow')
+        conversations = FakeConversations()
+        service = AssistantService(FakeExtractor(AssistantCommand(action=AssistantIntent.unknown)),
+                                   entries, conversations)
+        conversation_id = uuid.uuid4()
+        command = AssistantCommand(
+            action=AssistantIntent.update_entry, selected_entry_id=stored.id,
+            date=datetime.date(2026, 10, 27), date_phrase='в последний вторник октября',
+            date_unverified=True, move_intent=True,
+        )
+        token = assistant_module._now.set(datetime.datetime(2026, 10, 18, 12, 0))
+        try:
+            first = service._mutate(conversation_id, 'Перенеси на последний вторник октября',
+                                    command, stored)
+            self.assertEqual(repository.get(stored.id).date, datetime.date(2026, 10, 22))
+            self.assertIn('27 октября', first.assistant_text)
+            second = service.handle_message('да', 'Europe/Moscow', conversation_id)
+        finally:
+            assistant_module._now.reset(token)
+        self.assertEqual(second.status, AssistantStatus.completed)
+        self.assertEqual(repository.get(stored.id).date, datetime.date(2026, 10, 27))
+
     def test_explicit_past_meeting_requires_confirmation(self):
         repository = FakeRepository()
         entries = EntryService(repository)

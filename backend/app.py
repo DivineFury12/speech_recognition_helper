@@ -141,7 +141,9 @@ def create_app(settings: src.settings.Settings | None = None) -> fastapi.FastAPI
 
         if gigachat_client is not None:
             app.state.assistant_service = src.services.assistant.AssistantService(
-                src.services.command_extractor.ExternalCommandExtractor(gigachat_client),
+                src.services.command_extractor.ExternalCommandExtractor(
+                    gigachat_client, temporal_retry=bool(config.gigachat_auth_key),
+                ),
                 app.state.entries_service,
                 app.state.conversations,
                 src.adapters.assistant_request_repository.SqlAlchemyAssistantRequestRepository(

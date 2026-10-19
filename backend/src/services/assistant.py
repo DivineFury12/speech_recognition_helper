@@ -10,7 +10,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from src.ports.command_extractor import CommandExtractor
 from src.ports.conversations import ConversationRepository
-from src.schemas.assistant import (AssistantIntent, AssistantStatus, AssistantTurn, Entry, EntryKind,
+from src.schemas.assistant import (AssistantIntent, AssistantResponse, AssistantStatus, AssistantTurn, Entry, EntryKind,
                                    EntryStatus, EntryUpdate)
 from src.schemas.assistant_command import AssistantCommand
 from src.schemas.dialogue import DialogueTransition, PendingStep, ReplyAct, ScheduleRole
@@ -22,12 +22,14 @@ from src.services.guards import (CHOICE_WORDS, DONE_RE, HELP_SUGGESTIONS, HELP_T
                                  CLEAR_PRIORITY_RE, IMPORTANT_RE, MARK_PRIORITY_RE, ONLY_THIS_RE,
                                  REMIND_FOR_RE, STOP_SERIES_RE, UNDO_RE, UNDO_TEXT, find_lead,
                                  find_shift, find_until, is_short_unclear, restore_numbers,
-                                 yes_no)
+                                 requests_bulk_mutation, yes_no)
 from src.services.recurrence import find_recurrence, first_date, next_occurrence
 from src.user_context import current_user
 from src.services.temporal import (ambiguous_time_options, ambiguous_time_phrase,
-                                   parse_date, parse_duration, parse_target_date, parse_time,
-                                   replacement_schedule_reply, resolve_time_clarification)
+                                   daypart_of_time, mentioned_entry_kind, parse_date, parse_daypart, parse_duration,
+                                   parse_period, parse_target_date, parse_time,
+                                   replacement_schedule_reply, resolve_time_clarification,
+                                   time_constraint_phrase)
 
 SPLIT_RE = re.compile(
     r'\s*,?\s+(?:и|а\s+также|а\s+потом|потом|затем)\s+(?=(?:ещё\s+|еще\s+|мне\s+)?(?:поставь|создай|добавь|'
@@ -36,6 +38,12 @@ SPLIT_RE = re.compile(
     re.IGNORECASE,
 )
 _now: contextvars.ContextVar[datetime.datetime | None] = contextvars.ContextVar('assistant_now', default=None)
+_batch_remaining: contextvars.ContextVar[list[str] | None] = contextvars.ContextVar(
+    'assistant_batch_remaining', default=None,
+)
+_batch_interrupted: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    'assistant_batch_interrupted', default=False,
+)
 UNDO_FIELDS = ('title', 'date', 'time', 'duration_minutes', 'recurrence', 'status')
 logger = logging.getLogger(__name__)
 
@@ -81,10 +89,16 @@ class AssistantService:
         return missing
 
     @staticmethod
-    def _question(missing: list[str], command: AssistantCommand) -> str:
+    def _question(missing: list[str], command: AssistantCommand, *,
+                  text: str | None = None, today: datetime.date | None = None) -> str:
         options = ambiguous_time_options(command.time_phrase)
         if 'время' in missing and options:
             return f'Вы имели в виду {options[0]} или {options[1]}?'
+        if 'время' in missing and command.date is not None and text and today:
+            constraint = time_constraint_phrase(text)
+            if constraint:
+                return (f'Понял дату — {phrasing.format_day(command.date, today)}. '
+                        f'«{constraint}» не задаёт точное время. Во сколько поставить запись?')
         if 'дату' in missing and 'время' in missing:
             return 'На какую дату и время поставить запись?'
         questions = {
@@ -125,6 +139,12 @@ class AssistantService:
         answer: str, status: AssistantStatus, entries: list[Entry],
         pending: AssistantCommand | None = None, undo: dict | None = None,
     ) -> AssistantTurn:
+        queued = _batch_remaining.get()
+        if (pending is not None and status == AssistantStatus.needs_clarification
+                and queued and not _batch_interrupted.get()):
+            pending = pending.model_copy(update={'remaining_requests': queued})
+            answer += (f'\nПосле уточнения обработаю ещё {len(queued)} '
+                       f'{phrasing.plural(len(queued), "запись", "записи", "записей")}.')
         shown_pending = pending if status == AssistantStatus.needs_clarification else None
         turn = AssistantTurn(
             conversation_id=conversation_id, turn_id=uuid.uuid4(), user_text=text,
@@ -258,6 +278,10 @@ class AssistantService:
         entry: Entry,
     ) -> AssistantTurn:
         today = self._today()
+        if command.action == AssistantIntent.update_entry:
+            confirmation = self._schedule_confirmation(conversation_id, text, command, entry)
+            if confirmation is not None:
+                return confirmation
         forced = set(command.forced or [])
         if command.action in (AssistantIntent.update_entry, AssistantIntent.delete_entry):
             only = self._only_this(conversation_id, text, command, entry)
@@ -404,37 +428,115 @@ class AssistantService:
     def _handle_many(
         self, text: str, timezone: str, conversation_id: uuid.UUID | None, today: datetime.date,
     ) -> AssistantTurn:
-        """«Поставь встречу завтра в 10 и напомни за час» — two commands, handled one after another."""
-        parts = [p.strip(' ,.') for p in SPLIT_RE.split(text) if p and p.strip(' ,.')]
+        """Execute independent commands and resume queued ones after clarification."""
         pending = None
         if conversation_id is not None and self._conversations is not None:
             state = self._conversations.get(conversation_id)
             pending = state.pending_command if state else None
-        if len(parts) < 2 or pending is not None:
+        if pending is not None:
+            queued = pending.remaining_requests or []
+            token = _batch_remaining.set(queued)
+            interruption_token = _batch_interrupted.set(False)
+            try:
+                first = self._handle_at(text, timezone, conversation_id, today)
+                interrupted = _batch_interrupted.get()
+            finally:
+                _batch_interrupted.reset(interruption_token)
+                _batch_remaining.reset(token)
+            if first.status != AssistantStatus.completed or not queued or interrupted:
+                return first
+            rest = self._run_parts(queued, timezone, first.conversation_id, today)
+            return self._combine_turns(text, [first, rest])
+        parts = [p.strip(' ,.') for p in SPLIT_RE.split(text) if p and p.strip(' ,.')]
+        if len(parts) < 2 and re.search(
+            r'\b(?:создай|добавь|поставь|запланируй|запиши|напомни)\b',
+            text, re.IGNORECASE,
+        ) and re.search(r'\b(?:и|а|также|затем|потом)\b', text, re.IGNORECASE):
+            split = getattr(self._extractor, 'split_create_requests', None)
+            if callable(split):
+                parts = split(text)
+        if len(parts) < 2:
             return self._handle_at(text, timezone, conversation_id, today)
-        turns: list[AssistantTurn] = []
-        for index, part in enumerate(parts):
-            turn = self._handle_at(part, timezone, conversation_id, today)
-            conversation_id = turn.conversation_id
-            turns.append(turn)
-            if turn.status == AssistantStatus.needs_clarification:
-                rest = parts[index + 1:]
-                if rest:
-                    turns.append(turn.model_copy(update={
-                        'assistant_text': 'Остальное (' + '; '.join(f'«{r}»' for r in rest)
-                                          + ') скажите после ответа на вопрос.',
-                    }))
-                break
+        return self._run_parts(parts, timezone, conversation_id, today)
+
+    @staticmethod
+    def _combine_turns(text: str, turns: list[AssistantTurn]) -> AssistantTurn:
         last = turns[-1]
-        entries = {e.id: e for t in turns for e in t.entries}
-        statuses = [t.status for t in turns]
+        entries = {entry.id: entry for turn in turns for entry in turn.entries}
+        statuses = [turn.status for turn in turns]
+        responses = [response for turn in turns for response in (
+            turn.responses or [AssistantResponse(
+                text=turn.assistant_text, status=turn.status,
+                entries=turn.entries, suggestions=turn.suggestions,
+            )]
+        )]
         status = (AssistantStatus.needs_clarification if AssistantStatus.needs_clarification in statuses
                   else AssistantStatus.completed if AssistantStatus.completed in statuses else last.status)
         return last.model_copy(update={
             'turn_id': uuid.uuid4(), 'user_text': text, 'status': status,
-            'assistant_text': '\n'.join(t.assistant_text for t in turns),
-            'entries': list(entries.values()),
+            'assistant_text': '\n'.join(turn.assistant_text for turn in turns),
+            'entries': list(entries.values()), 'responses': responses,
         })
+
+    def _run_parts(
+        self, parts: list[str], timezone: str, conversation_id: uuid.UUID | None,
+        today: datetime.date,
+    ) -> AssistantTurn:
+        turns: list[AssistantTurn] = []
+        for index, part in enumerate(parts):
+            token = _batch_remaining.set(parts[index + 1:])
+            try:
+                turn = self._handle_at(part, timezone, conversation_id, today)
+            finally:
+                _batch_remaining.reset(token)
+            conversation_id = turn.conversation_id
+            turns.append(turn)
+            if turn.status == AssistantStatus.needs_clarification:
+                break
+        return self._combine_turns(' и '.join(parts), turns)
+
+    def _preview_bulk_delete(
+        self, conversation_id: uuid.UUID, text: str,
+        period: tuple[datetime.date, datetime.date] | None = None,
+    ) -> AssistantTurn:
+        command = AssistantCommand(action=AssistantIntent.delete_entry)
+        if self._entries is None:
+            return self._turn(conversation_id, text, command,
+                              'База записей не подключена. Ничего не удалено.',
+                              AssistantStatus.no_action, [])
+        period = period or parse_period(text, self._today())
+        if period is None:
+            return self._turn(conversation_id, text, command,
+                              'Укажите период для массового удаления, например «за эту неделю». '
+                              'Ничего не удалено.', AssistantStatus.no_action, [])
+        kind = mentioned_entry_kind(text)
+        matches = self._entries.list_period(*period, kind=kind)
+        # Recurring entries may appear on several days; deleting their ID removes the series.
+        unique = list({entry.id: entry for entry in matches}.values())
+        if not unique:
+            return self._turn(conversation_id, text, command,
+                              'За этот период подходящих записей нет. Ничего не удалено.',
+                              AssistantStatus.no_action, [])
+        if len(unique) > 50:
+            return self._turn(conversation_id, text, command,
+                              f'Найдено {len(unique)} записей. Назовите более короткий период: '
+                              'за один раз можно удалить до 50 записей.',
+                              AssistantStatus.no_action, [])
+        pending = command.model_copy(update={
+            'kind': kind,
+            'confirm': 'bulk_delete', 'candidate_ids': [entry.id for entry in unique],
+        })
+        lines = [phrasing.entry_line(entry, self._today(), show_date=True)[:85]
+                 for entry in unique[:8]]
+        rest = f'\n…и ещё {len(unique) - 8}.' if len(unique) > 8 else ''
+        series = (' Повторяющаяся запись будет удалена целиком.'
+                  if any(entry.recurrence for entry in unique) else '')
+        answer = (f'Удалить {len(unique)} {phrasing.plural(len(unique), "запись", "записи", "записей")}'
+                  f' за период {phrasing.format_day(period[0], self._today())} — '
+                  f'{phrasing.format_day(period[1], self._today())}?\n'
+                  + '\n'.join(lines) + rest + series + '\nПодтвердите или отмените удаление.')
+        return self._turn(conversation_id, text, command, answer,
+                          AssistantStatus.needs_clarification, unique[:8], pending)
 
     def _guard(
         self, conversation_id: uuid.UUID, text: str, timezone: str,
@@ -442,7 +544,46 @@ class AssistantService:
     ) -> tuple[AssistantTurn | None, object]:
         """Our checks that run before the dialogue engine: undo, confirmations, «я купил»."""
         previous = state.pending_command if state is not None else None
+        if requests_bulk_mutation(text, has_period=True):
+            if previous is not None:
+                _batch_interrupted.set(True)
+            classify = getattr(self._extractor, 'classify_bulk_delete', None)
+            if callable(classify):
+                try:
+                    proposal = classify(text, self._today())
+                except Exception:
+                    logger.warning('Bulk delete period classifier unavailable', exc_info=True)
+                    command = AssistantCommand(action=AssistantIntent.delete_entry)
+                    return self._turn(
+                        conversation_id, text, command,
+                        'Не удалось надёжно определить период удаления. '
+                        'Уточните даты; ничего не удалено.',
+                        AssistantStatus.no_action, [],
+                    ), state
+                if proposal.scope == 'single':
+                    return None, state
+                if proposal.scope == 'unclear':
+                    command = AssistantCommand(action=AssistantIntent.delete_entry)
+                    return self._turn(
+                        conversation_id, text, command,
+                        'Не понял, какие записи нужно удалить. Уточните запрос.',
+                        AssistantStatus.no_action, [],
+                    ), state
+                if proposal.date_from is None or proposal.date_to is None:
+                    command = AssistantCommand(action=AssistantIntent.delete_entry)
+                    return self._turn(
+                        conversation_id, text, command,
+                        'Укажите период для массового удаления; ничего не удалено.',
+                        AssistantStatus.no_action, [],
+                    ), state
+                return self._preview_bulk_delete(
+                    conversation_id, text, (proposal.date_from, proposal.date_to),
+                ), state
+            if parse_period(text, self._today()) is not None:
+                return self._preview_bulk_delete(conversation_id, text), state
         if UNDO_RE.match(text):
+            if previous is not None:
+                _batch_interrupted.set(True)
             return self._undo_last(conversation_id, text), state
         if previous is not None and previous.confirm:
             turn = self._on_confirm(conversation_id, text, timezone, previous)
@@ -576,10 +717,184 @@ class AssistantService:
 
     def _on_confirm(self, conversation_id: uuid.UUID, text: str, timezone: str,
                     previous: AssistantCommand) -> AssistantTurn | None:
-        answer = yes_no(text)
         kind = previous.confirm
+        answer = yes_no(text)
+        supplied_date = parse_date(text, self._today()) if kind in ('schedule', 'schedule_constraints') else None
+        supplied_time = parse_time(text) if kind in ('schedule', 'schedule_constraints') else None
+        supplied_period = parse_period(text, self._today()) if kind == 'schedule_constraints' else None
+        supplied_daypart = parse_daypart(text) if kind == 'schedule_constraints' else None
+        if (kind != 'bulk_delete' and answer is None and supplied_date is None and supplied_time is None
+                and supplied_period is None and supplied_daypart is None
+                and self._conversations is not None):
+            state = self._conversations.get(conversation_id)
+            history = ([{'role': item.role, 'text': item.text} for item in state.messages]
+                       if state else [])
+            question = next((item['text'] for item in reversed(history)
+                             if item['role'] == 'assistant'), '')
+            decision = self._dialogue.confirmation(
+                text, question, history=history, pending=previous,
+            )
+            answer = 'yes' if decision is True else 'no' if decision is False else None
+        if kind == 'bulk_delete':
+            # A reply can narrow the frozen set. A long affirmative phrase may also
+            # name a subset, so only a short, unqualified answer confirms all.
+            if len(text.split()) > 2:
+                answer = None
+            if answer == 'no':
+                return self._turn(conversation_id, text, previous,
+                                  'Хорошо, записи оставлены без изменений.',
+                                  AssistantStatus.no_action, [])
+            mode = None
+            selected = []
+            candidates = []
+            if answer is None:
+                candidates = [self._entries.get(entry_id)
+                              for entry_id in previous.candidate_ids or []]
+                candidates = [entry for entry in candidates if entry is not None]
+            if answer is None and candidates:
+                classify = getattr(self._extractor, 'classify_bulk_selection', None)
+                if callable(classify):
+                    try:
+                        mode, selected = classify(text, candidates)
+                    except Exception:
+                        logger.warning('Bulk selection classifier unavailable', exc_info=True)
+            if answer == 'yes' or mode == 'confirm_all':
+                removed = 0
+                for entry_id in previous.candidate_ids or []:
+                    if self._entries.delete(entry_id):
+                        removed += 1
+                return self._turn(conversation_id, text, previous,
+                                  f'Удалено записей: {removed}.',
+                                  AssistantStatus.completed, [])
+            if mode == 'cancel':
+                return self._turn(conversation_id, text, previous,
+                                  'Хорошо, записи оставлены без изменений.',
+                                  AssistantStatus.no_action, [])
+            if mode == 'new_request':
+                return None
+            if mode == 'select' and selected:
+                narrowed = previous.model_copy(update={
+                    'candidate_ids': [entry.id for entry in selected],
+                })
+                lines = '\n'.join(phrasing.entry_line(entry, self._today(), show_date=True)
+                                  for entry in selected)
+                return self._turn(
+                    conversation_id, text, narrowed,
+                    f'Удалить только эти {len(selected)} '
+                    f'{phrasing.plural(len(selected), "запись", "записи", "записей")}?\n'
+                    + lines + '\nПодтвердите или отмените удаление.',
+                    AssistantStatus.needs_clarification, selected, narrowed,
+                )
+            return self._turn(conversation_id, text, previous,
+                              'Не удалось определить выбор. Назовите нужные записи из списка '
+                              'или подтвердите удаление всех перечисленных.',
+                              AssistantStatus.needs_clarification, candidates[:8], previous)
         base = previous.model_copy(update={'confirm': None, 'confirm_entry_id': None})
         entry = self._entries.get(previous.confirm_entry_id) if previous.confirm_entry_id else None
+        if kind == 'schedule_constraints':
+            date_outside, daypart_changed = self._schedule_constraint_mismatches(base)
+            if (supplied_date is not None or supplied_time is not None
+                    or supplied_period is not None or supplied_daypart is not None):
+                changes = {}
+                if supplied_date is not None:
+                    changes['date'] = supplied_date
+                    if date_outside and supplied_date == base.date:
+                        changes.update(date_window_start=None, date_window_end=None)
+                elif supplied_period is not None and supplied_period[0] != supplied_period[1]:
+                    changes.update(date=None, date_window_start=supplied_period[0],
+                                   date_window_end=supplied_period[1])
+                if supplied_time is not None:
+                    changes['time'] = supplied_time
+                    if daypart_changed and supplied_time == base.time:
+                        changes['preferred_daypart'] = None
+                elif supplied_daypart is not None:
+                    if daypart_changed and supplied_daypart == daypart_of_time(base.time):
+                        changes['preferred_daypart'] = None
+                    else:
+                        changes.update(time=None, preferred_daypart=supplied_daypart)
+                revised = base.model_copy(update=changes)
+                missing = self._missing(revised)
+                if missing:
+                    return self._turn(conversation_id, text, revised,
+                                      self._question(missing, revised),
+                                      AssistantStatus.needs_clarification, [], revised)
+                return self._create(conversation_id, text, revised, timezone)
+            if answer == 'yes':
+                accepted = base.model_copy(update={
+                    'date_window_start': None, 'date_window_end': None,
+                    'preferred_daypart': None,
+                })
+                return self._create(conversation_id, text, accepted, timezone)
+            if answer == 'no':
+                revised = base.model_copy(update={
+                    'date': None if date_outside else base.date,
+                    'time': None if daypart_changed else base.time,
+                })
+                missing = self._missing(revised)
+                return self._turn(conversation_id, text, revised,
+                                  self._question(missing, revised),
+                                  AssistantStatus.needs_clarification, [], revised)
+            if is_short_unclear(text):
+                return self._create(conversation_id, text, base, timezone)
+            return None
+        if kind == 'schedule':
+            if supplied_date is not None or supplied_time is not None:
+                corrected = base.model_copy(update={
+                    'date': supplied_date or base.date,
+                    'date_unverified': None if supplied_date is not None else base.date_unverified,
+                    'time': supplied_time or base.time,
+                    'time_unverified': None if supplied_time is not None else base.time_unverified,
+                })
+                confirmation = self._schedule_confirmation(conversation_id, text, corrected, entry)
+                if confirmation is not None:
+                    return confirmation
+                if corrected.action == AssistantIntent.create_entry:
+                    missing = self._missing(corrected)
+                    if missing:
+                        return self._turn(conversation_id, text, corrected,
+                                          self._question(missing, corrected),
+                                          AssistantStatus.needs_clarification, [], corrected)
+                    return self._create(conversation_id, text, corrected, timezone)
+                if entry is not None:
+                    if self._needs_update_details(corrected):
+                        return self._turn(conversation_id, text, corrected,
+                                          self._update_question(corrected, entry),
+                                          AssistantStatus.needs_clarification, [entry], corrected)
+                    return self._mutate(conversation_id, text, corrected, entry)
+            if answer == 'yes':
+                accepted = base.model_copy(update={
+                    'date_unverified': None, 'time_unverified': None,
+                    'forced': sorted(set(base.forced or []) | {'schedule'}),
+                })
+                if accepted.action == AssistantIntent.create_entry:
+                    missing = self._missing(accepted)
+                    if missing:
+                        return self._turn(conversation_id, text, accepted,
+                                          self._question(missing, accepted),
+                                          AssistantStatus.needs_clarification, [], accepted)
+                    return self._create(conversation_id, text, accepted, timezone)
+                if entry is not None:
+                    if self._needs_update_details(accepted):
+                        return self._turn(conversation_id, text, accepted,
+                                          self._update_question(accepted, entry),
+                                          AssistantStatus.needs_clarification, [entry], accepted)
+                    return self._mutate(conversation_id, text, accepted, entry)
+            if answer == 'no':
+                rejected = base.model_copy(update={
+                    'date': None if base.date_unverified else base.date,
+                    'time': None if base.time_unverified else base.time,
+                    'date_unverified': None, 'time_unverified': None,
+                })
+                if rejected.action == AssistantIntent.create_entry:
+                    missing = self._missing(rejected)
+                    question = self._question(missing, rejected) if missing else 'Назовите дату и время ещё раз.'
+                else:
+                    question = 'Назовите новую дату или время для переноса.'
+                return self._turn(conversation_id, text, rejected, question,
+                                  AssistantStatus.needs_clarification, [entry] if entry else [], rejected)
+            if is_short_unclear(text):
+                return self._schedule_confirmation(conversation_id, text, base, entry)
+            return None
         new_date = parse_date(text, self._today()) if kind in ('past', 'conflict') else None
         new_time = parse_time(text) if kind in ('past', 'conflict') else None
         if new_date or new_time:
@@ -609,6 +924,30 @@ class AssistantService:
                               f'Не понял ответ. {question} Ответьте «да» или «нет».',
                               AssistantStatus.needs_clarification, [entry] if entry else [], previous)
         return None
+
+    def _schedule_confirmation(
+        self, conversation_id: uuid.UUID, text: str, command: AssistantCommand,
+        entry: Entry | None = None,
+    ) -> AssistantTurn | None:
+        if not (command.date_unverified or command.time_unverified):
+            return None
+        parts = []
+        if command.date_unverified and command.date is not None:
+            parts.append(f'дата — {phrasing.format_day(command.date, self._today())}')
+        if command.time_unverified and command.time is not None:
+            parts.append(f'время — {command.time}')
+        if not parts:
+            return None
+        requested_fields = ('дату и время' if command.date_unverified and command.time_unverified
+                            else 'дату' if command.date_unverified else 'время')
+        pending = command.model_copy(update={
+            'confirm': 'schedule', 'confirm_entry_id': entry.id if entry else None,
+            'candidate_ids': None,
+        })
+        return self._turn(conversation_id, text, command,
+                          f'Проверьте распознанные данные: {", ".join(parts)}. '
+                          f'Подтвердите их или укажите {requested_fields} ещё раз.',
+                          AssistantStatus.needs_clarification, [entry] if entry else [], pending)
 
     def _undo_last(self, conversation_id: uuid.UUID, text: str) -> AssistantTurn:
         record = (self._conversations.get_undo(conversation_id)
@@ -647,10 +986,48 @@ class AssistantService:
                           f'Вернул как было: {phrasing.describe(restored, today)}.',
                           AssistantStatus.completed, [restored], undo={})
 
+    @staticmethod
+    def _schedule_constraint_mismatches(command: AssistantCommand) -> tuple[bool, bool]:
+        date_outside = bool(
+            command.date is not None and command.date_window_start is not None
+            and command.date_window_end is not None
+            and not command.date_window_start <= command.date <= command.date_window_end
+        )
+        daypart_changed = bool(
+            command.time is not None and command.preferred_daypart is not None
+            and daypart_of_time(command.time) != command.preferred_daypart
+        )
+        return date_outside, daypart_changed
+
     def _create(self, conversation_id: uuid.UUID, text: str, command: AssistantCommand,
                 timezone: str) -> AssistantTurn:
         today = self._today()
         forced = set(command.forced or [])
+        if 'schedule_constraints' not in forced:
+            date_outside, daypart_changed = self._schedule_constraint_mismatches(command)
+            if date_outside or daypart_changed:
+                changes = []
+                if date_outside:
+                    changes.append(
+                        f'сначала вы указали период '
+                        f'{command.date_window_start:%d.%m}–{command.date_window_end:%d.%m}, '
+                        f'а теперь {command.date:%d.%m}'
+                    )
+                if daypart_changed:
+                    label = {
+                        'morning': 'утро', 'afternoon': 'день',
+                        'evening': 'вечер', 'night': 'ночь',
+                    }[command.preferred_daypart]
+                    changes.append(f'сначала вы указали {label}, а теперь {command.time}')
+                changed_fields = ('новые дату и время' if date_outside and daypart_changed
+                                  else 'новую дату' if date_outside else 'новое время')
+                pending = command.model_copy(update={'confirm': 'schedule_constraints'})
+                return self._turn(
+                    conversation_id, text, command,
+                    'Уточню: ' + '; '.join(changes) + '. '
+                    f'Оставить {changed_fields} или вернуться к первоначальным ограничениям?',
+                    AssistantStatus.needs_clarification, [], pending,
+                )
         title = phrasing.capitalize(command.title)
         if command.recurrence is not None and command.date is None:
             command = command.model_copy(update={'date': first_date(command.recurrence, today)})
@@ -711,6 +1088,9 @@ class AssistantService:
         pending_step = plan.pending_step
         pending_reply = plan.reply
         transition = plan.transition
+        if (state is not None and state.pending_command is not None
+                and transition in (DialogueTransition.cancel, DialogueTransition.new_command)):
+            _batch_interrupted.set(True)
         preextracted = plan.preextracted
         future_task = plan.task_fallback
         if previous is not None and transition == DialogueTransition.cancel:
@@ -891,6 +1271,11 @@ class AssistantService:
             if grounded:
                 command = command.model_copy(update=grounded)
         missing = self._missing(command)
+        if (not missing and command.action == AssistantIntent.create_entry
+                and self._entries is not None and self._conversations is not None):
+            confirmation = self._schedule_confirmation(conversation_id, text, command)
+            if confirmation is not None:
+                return confirmation
 
         result_entries = []
         status = AssistantStatus.no_action
@@ -900,7 +1285,7 @@ class AssistantService:
         elif missing and (self._entries is None or self._conversations is None):
             answer = f"Не хватает данных: {', '.join(missing)}. Диалог уточнения не подключён."
         elif missing:
-            answer = self._question(missing, command)
+            answer = self._question(missing, command, text=text, today=today)
             status = AssistantStatus.needs_clarification
         elif self._entries is None:
             answer = 'Команда распознана, но запись и поиск пока не подключены. Действие не выполнено.'

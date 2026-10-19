@@ -1,5 +1,6 @@
 """Verify date and time against words actually present in a user request."""
 
+import calendar
 import datetime
 import re
 
@@ -110,6 +111,20 @@ def _calendar_date(day: int, month: int, year: int | None, today: datetime.date)
         return None
 
 
+def _next_day_of_month(day: int, today: datetime.date) -> datetime.date | None:
+    """Resolve «20 числа» to the next occurrence in a calendar month."""
+    for offset in range(48):
+        month_index = today.year * 12 + today.month - 1 + offset
+        year, month_zero = divmod(month_index, 12)
+        try:
+            result = datetime.date(year, month_zero + 1, day)
+        except ValueError:
+            continue
+        if result >= today:
+            return result
+    return None
+
+
 def _relative_date(today: datetime.date, count: str | None, unit: str) -> datetime.date | None:
     amount = (1 if count is None else 2 if count in ('пару', 'пара') else
               int(count) if count.isdigit() else HOUR_WORDS[count])
@@ -141,6 +156,10 @@ def parse_date(phrase: str, today: datetime.date) -> datetime.date | None:
         return today + datetime.timedelta(days=1)
     if re.search(r'\bсегодня\b', value):
         return today
+    if re.search(r'\bпозавчера\b', value):
+        return today - datetime.timedelta(days=2)
+    if re.search(r'\bвчера\b', value):
+        return today - datetime.timedelta(days=1)
 
     iso = re.search(r'(?<!\d)(\d{4})-(\d{1,2})-(\d{1,2})(?!\d)', value)
     if iso:
@@ -161,6 +180,56 @@ def parse_date(phrase: str, today: datetime.date) -> datetime.date | None:
     if month_match:
         return _calendar_date(int(month_match.group('day')),
                               _month_number(month_match.group('month')), None, today)
+
+    day_of_month = re.search(r'(?<!\d)(?P<day>\d{1,2})(?:-?го)?\s+числа\b', value)
+    if day_of_month:
+        return _next_day_of_month(int(day_of_month.group('day')), today)
+
+    ordinal_weekday = re.search(
+        r'\b(?P<ordinal>последн\w*|перв\w*|второ\w*|трет\w*|четверт\w*|пят\w*)'
+        r'\s+(?P<weekday>понедельник\w*|вторник\w*|сред\w*|четверг\w*|'
+        r'пятниц\w*|суббот\w*|воскресен\w*)\b', value,
+    )
+    if ordinal_weekday:
+        rest = value[ordinal_weekday.end():]
+        month_match = re.match(
+            rf'\s*(?:в\s+)?(?P<month>{MONTH_PATTERN})(?!\w)'
+            r'(?:\s+(?P<year>\d{4}))?', rest,
+        )
+        if month_match is None:
+            return None
+        month = _month_number(month_match.group('month'))
+        if month is None:
+            return None
+        weekday = next(index for stem, index in WEEKDAYS.items()
+                       if ordinal_weekday.group('weekday').startswith(stem))
+        ordinal = ordinal_weekday.group('ordinal')
+        position = (0 if ordinal.startswith('последн') else
+                    1 if ordinal.startswith('перв') else
+                    2 if ordinal.startswith('второ') else
+                    3 if ordinal.startswith('трет') else
+                    4 if ordinal.startswith('четверт') else 5)
+        year = int(month_match.group('year') or today.year)
+        for _ in range(2 if month_match.group('year') is None else 1):
+            last_day = calendar.monthrange(year, month)[1]
+            if position == 0:
+                last_weekday = datetime.date(year, month, last_day).weekday()
+                day = last_day - (last_weekday - weekday) % 7
+            else:
+                first_weekday = datetime.date(year, month, 1).weekday()
+                day = 1 + (weekday - first_weekday) % 7 + (position - 1) * 7
+            if day > last_day:
+                return None
+            result = datetime.date(year, month, day)
+            if month_match.group('year') is not None or result >= today:
+                return result
+            year += 1
+        return None
+
+    if re.search(rf'\b(?:{MONTH_PATTERN})(?!\w)', value) and any(
+        stem in value for stem in WEEKDAYS
+    ):
+        return None
 
     for stem, weekday in WEEKDAYS.items():
         if stem in value:
@@ -339,8 +408,11 @@ def parse_time(phrase: str) -> str | None:
         return '00:00'
     if 'полден' in value or 'полдн' in value:
         return '12:00'
-    clock = re.search(r'(?<!\d)(\d{1,2}):([0-5]\d)(?!\d)', value)
-    if clock:
+    for clock in re.finditer(r'(?<!\d)(\d{1,2}):([0-5]\d)(?!\d)', value):
+        # A bound ("до 10:00", "после 10:00") does not specify a single
+        # moment at which a reminder can be scheduled.
+        if re.search(r'\b(?:до|после|раньше|позже)\s*$', value[:clock.start()]):
+            continue
         hour = int(clock.group(1))
         if hour < 24:
             return f'{hour:02d}:{int(clock.group(2)):02d}'
@@ -352,6 +424,8 @@ def parse_time(phrase: str) -> str | None:
     )
     for spoken in spoken_matches:
         prefix = value[:spoken.start()]
+        if re.search(r'\b(?:до|после|раньше|позже)\s*$', prefix):
+            continue
         if spoken.group('period') == 'дня' and re.search(r'\bчерез\s*$', prefix):
             continue
         hour_token = spoken.group('hour')
@@ -372,9 +446,40 @@ def parse_time(phrase: str) -> str | None:
         hour = int(token) if token.isdigit() else HOUR_WORDS[token]
         if hour < 24:
             if 1 <= hour <= 11:
+                daypart = parse_daypart(value[:simple.start()].split('.')[-1])
+                if daypart == 'morning':
+                    return f'{hour:02d}:00'
+                if daypart == 'afternoon' or daypart == 'evening':
+                    return f'{hour + 12:02d}:00'
                 return None
             return f'{hour:02d}:00'
     return None
+
+
+def parse_daypart(phrase: str) -> str | None:
+    """Classify an explicitly mentioned part of day, without inventing a clock time."""
+    value = phrase.casefold().replace('ё', 'е')
+    matches = set()
+    for label, pattern in (
+        ('morning', r'\b(?:утр\w*|с\s+утра)\b'),
+        ('afternoon', r'\b(?:днем|дня|после\s+обеда)\b'),
+        ('evening', r'\b(?:вечер\w*|вечером)\b'),
+        ('night', r'\b(?:ноч\w*|ночью)\b'),
+    ):
+        if re.search(pattern, value):
+            matches.add(label)
+    return next(iter(matches)) if len(matches) == 1 else None
+
+
+def daypart_of_time(value: str) -> str:
+    hour = int(value[:2])
+    if 5 <= hour < 12:
+        return 'morning'
+    if 12 <= hour < 18:
+        return 'afternoon'
+    if 18 <= hour < 24:
+        return 'evening'
+    return 'night'
 
 
 def ambiguous_time_phrase(text: str) -> str | None:
@@ -387,9 +492,21 @@ def ambiguous_time_phrase(text: str) -> str | None:
     )
     if match is None:
         return None
+    if parse_daypart(value[:match.start()].split('.')[-1]) is not None:
+        return None
     token = match.group('hour')
     hour = int(token) if token.isdigit() else HOUR_WORDS[token]
     return match.group() if 1 <= hour <= 11 else None
+
+
+def time_constraint_phrase(text: str) -> str | None:
+    """Find a time boundary that does not specify one exact schedule time."""
+    match = re.search(
+        rf'\b(?:до|после|раньше|позже)\s+{HOUR_PATTERN}(?::[0-5]\d)?'
+        r'(?:\s+(?:утра|дня|вечера|ночи))?\b',
+        text.casefold().replace('ё', 'е'),
+    )
+    return match.group() if match else None
 
 
 def ambiguous_time_options(phrase: str | None) -> tuple[str, str] | None:
@@ -431,19 +548,21 @@ def replacement_schedule_reply(
 ) -> tuple[datetime.date | None, str | None, str | None] | None:
     """Read a standalone schedule without interpreting a new command as a reply."""
     value = reply.casefold().replace('ё', 'е')
-    if (value.rstrip().endswith('?') or not re.match(
-        r'^\s*(?:на\s+|в\s+|к\s+|через\s+|спустя\s+|сегодня\b|завтра\b|'
-        r'послезавтра\b|следующ\w*\s+|\d{1,2}(?:[:./]|\s+))',
-        value,
-    ) or re.search(
-        r'\b(?:создай|создать|добавь|добавить|напомни|покажи|найди|'
-        r'удали|удалить|перенеси|перенести|отметь)\b', value,
-    )):
-        return None
     date = parse_date(reply, today)
     time = parse_time(reply)
     uncertain_time = ambiguous_time_phrase(reply)
-    if date is None and time is None and uncertain_time is None:
+    starts_with_schedule = re.match(
+        r'^\s*(?:на\s+|в\s+|к\s+|через\s+|спустя\s+|сегодня\b|завтра\b|'
+        r'послезавтра\b|следующ\w*\s+|\d{1,2}(?:[:./]|\s+))',
+        value,
+    )
+    has_new_action = re.search(
+        r'\b(?:создай|создать|добавь|добавить|напомни|покажи|найди|'
+        r'удали|удалить|перенеси|перенести|отметь)\b', value,
+    )
+    if (value.rstrip().endswith('?') or not (date or time or uncertain_time)
+            or not (date is not None or time is not None or starts_with_schedule)
+            or has_new_action):
         return None
     return date, time, uncertain_time
 
@@ -515,6 +634,7 @@ SEARCH_FILTER_WORDS = TITLE_STOPWORDS | {
 SEARCH_FILTER_STEMS = (
     'напомин', 'задач', 'встреч', 'созвон', 'запис', 'событ',
     'недел', 'месяц', 'сегодня', 'завтра', 'позавчера',
+    'планир', 'запланир', 'мероприят', 'последн', 'котор',
 )
 
 
@@ -534,9 +654,10 @@ def verify_search_query(query: str | None, text: str, *, topic: bool = False) ->
         return None
     if topic:
         source = _topic_words(text)
-        if not source or not any(
+        proposed = _topic_words(query)
+        if not source or not proposed or not all(
             any(word.startswith(candidate[:3]) for word in source)
-            for candidate in _topic_words(query)
+            for candidate in proposed
         ):
             return None
     return query
@@ -558,13 +679,32 @@ def verify_creation_fields(
     command: AssistantCommand, text: str, today: datetime.date,
 ) -> AssistantCommand:
     """Ignore invented title/date/time while retaining explicit user details."""
-    date = parse_date(command.date_phrase, today) if _in_text(command.date_phrase, text) else None
-    if date is None:
-        date = parse_date(text, today)
-    time = parse_time(command.time_phrase) if _in_text(command.time_phrase, text) else None
-    if time is None:
-        time = parse_time(text)
-    time_phrase = command.time_phrase if _in_text(command.time_phrase, text) else None
+    date_evidence = _in_text(command.date_phrase, text)
+    checked_date = parse_date(command.date_phrase, today) if date_evidence else None
+    date = checked_date or parse_date(text, today)
+    date_unverified = None
+    period = parse_period(text, today)
+    is_range = period is not None and period[0] != period[1] and checked_date is None
+    if is_range:
+        date = None
+    elif (date_evidence and date is None and command.date is not None
+          and getattr(command.date_relation, 'value', command.date_relation) == 'exact'
+          and not re.search(r'(?<!\d)\d{4}-\d{1,2}-\d{1,2}|(?<!\d)\d{1,2}[./]\d{1,2}',
+                            command.date_phrase)):
+        date, date_unverified = command.date, True
+    time_evidence = _in_text(command.time_phrase, text)
+    checked_time = parse_time(command.time_phrase) if time_evidence else None
+    time = checked_time or parse_time(text)
+    time_unverified = None
+    if (time_evidence and time is None and command.time is not None
+            and getattr(command.time_relation, 'value', command.time_relation) == 'exact'
+            and time_constraint_phrase(command.time_phrase) is None
+            and not re.search(r'(?<!\d)\d{1,2}:[0-5]\d(?!\d)', command.time_phrase)):
+        time, time_unverified = command.time, True
+    if time_evidence and time_constraint_phrase(command.time_phrase) is not None:
+        time = None
+        time_unverified = None
+    time_phrase = command.time_phrase if time_evidence else None
     duration_text = text
     if time is not None and time_phrase and parse_time(time_phrase) == time:
         # A clock expression such as «на 17 часов» is not also a 17-hour
@@ -578,11 +718,20 @@ def verify_creation_fields(
     return command.model_copy(update={
         'title': command.title if _title_has_source(command.title, text) else None,
         'date': date, 'date_phrase': command.date_phrase if date is not None else None,
+        'date_unverified': date_unverified,
         'time': time,
+        'time_unverified': time_unverified,
         'time_phrase': (
-            command.time_phrase if time is not None else ambiguous_time_phrase(text)
+            time_phrase if time is not None or time_evidence else ambiguous_time_phrase(text)
         ),
         'duration_minutes': duration,
+        'date_window_start': (
+            period[0] if period is not None and period[0] != period[1] else None
+        ),
+        'date_window_end': (
+            period[1] if period is not None and period[0] != period[1] else None
+        ),
+        'preferred_daypart': parse_daypart(text) if time is None else None,
     })
 
 
@@ -599,13 +748,37 @@ def verify_mutation_fields(
         if _in_text(command.target_time_phrase, text) else None
     )
     if command.action.value == 'update_entry':
-        date = parse_date(command.date_phrase, today) if _in_text(command.date_phrase, text) else None
-        time = parse_time(command.time_phrase) if _in_text(command.time_phrase, text) else None
+        date_evidence = _in_text(command.date_phrase, text)
+        checked_date = parse_date(command.date_phrase, today) if date_evidence else None
+        date = checked_date
+        date_unverified = None
+        period = parse_period(command.date_phrase, today) if date_evidence else None
+        is_range = period is not None and period[0] != period[1] and checked_date is None
+        if is_range:
+            date = None
+        elif (date_evidence and date is None and command.date is not None
+              and getattr(command.date_relation, 'value', command.date_relation) == 'exact'
+              and not re.search(r'(?<!\d)\d{4}-\d{1,2}-\d{1,2}|(?<!\d)\d{1,2}[./]\d{1,2}',
+                                command.date_phrase)):
+            date, date_unverified = command.date, True
+        time_evidence = _in_text(command.time_phrase, text)
+        checked_time = parse_time(command.time_phrase) if time_evidence else None
+        time = checked_time
+        time_unverified = None
+        if (time_evidence and time is None and command.time is not None
+                and getattr(command.time_relation, 'value', command.time_relation) == 'exact'
+                and time_constraint_phrase(command.time_phrase) is None
+                and not re.search(r'(?<!\d)\d{1,2}:[0-5]\d(?!\d)', command.time_phrase)):
+            time, time_unverified = command.time, True
+        if time_evidence and time_constraint_phrase(command.time_phrase) is not None:
+            time = None
+            time_unverified = None
         new_title = command.new_title if _title_has_source(command.new_title, text) else None
         duration_minutes = parse_duration(text, for_update=True)
-        time_phrase = command.time_phrase if time is not None else ambiguous_time_phrase(text)
+        time_phrase = command.time_phrase if time_evidence else ambiguous_time_phrase(text)
     else:
         date = time = new_title = None
+        date_unverified = time_unverified = None
         duration_minutes = None
         time_phrase = None
     return command.model_copy(update={
@@ -614,7 +787,9 @@ def verify_mutation_fields(
         'target_date': target_date,
         'target_time': target_time,
         'date': date,
+        'date_unverified': date_unverified,
         'time': time,
+        'time_unverified': time_unverified,
         'time_phrase': time_phrase,
         'new_title': new_title,
         'duration_minutes': duration_minutes,

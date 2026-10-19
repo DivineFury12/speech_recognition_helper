@@ -123,7 +123,7 @@ def services_status(request: fastapi.Request) -> ServicesStatus:
     elif health.healthy:
         items.append(('Понимание команд', 'ok', 'GigaChat отвечает'))
     else:
-        items.append(('Понимание команд', 'error', 'GigaChat не отвечает, работают правила — проверьте ключ'))
+        items.append(('Понимание команд', 'error', 'Последний запрос GigaChat не удался; работают правила'))
     items.append(('База данных', 'ok' if state.entries_service is not None else 'error',
                   'PostgreSQL подключён' if state.entries_service is not None else 'PostgreSQL не подключён'))
     if not state.voice_enabled:

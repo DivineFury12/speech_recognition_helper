@@ -100,14 +100,20 @@ export const useChatStore = defineStore('chat', () => {
       conversationId.value = turn.conversation_id
       awaiting.value = turn.status === 'needs_clarification'
       speak(turn.assistant_text)
-      messages.value.push({
-        id: turn.turn_id,
-        role: 'assistant',
+      const replies = turn.responses?.length ? turn.responses : [{
         text: turn.assistant_text,
         status: turn.status,
         entries: turn.entries,
         suggestions: turn.suggestions ?? [],
-      })
+      }]
+      messages.value.push(...replies.map((reply, index) => ({
+        id: `${turn.turn_id}:${index}`,
+        role: 'assistant' as const,
+        text: reply.text,
+        status: reply.status,
+        entries: reply.entries,
+        suggestions: reply.suggestions ?? [],
+      })))
     } catch (e) {
       const m = messages.value.find((x) => x.id === userId)
       if (m) {

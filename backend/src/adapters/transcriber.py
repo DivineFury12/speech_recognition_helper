@@ -1,9 +1,6 @@
 import pathlib
 import threading
 
-import gigaam
-import torch
-
 import src.errors
 import src.schemas.transcribe
 
@@ -21,6 +18,11 @@ class GigaAMTransciber:
         requested_device: str,
         cache_dir: pathlib.Path, 
     ) -> 'GigaAMTransciber':
+        try:
+            import gigaam
+            import torch
+        except ModuleNotFoundError as exc:
+            raise RuntimeError('Для голосового режима установите torch и gigaam') from exc
         if requested_device not in {'auto', 'cpu', 'cuda'}:
             raise ValueError('GIGAAM_DEVICE должен быть auto, cpu или cuda')
         

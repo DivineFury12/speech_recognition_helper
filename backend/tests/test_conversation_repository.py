@@ -64,6 +64,24 @@ class ConversationRepositoryIntegrationTests(unittest.TestCase):
             with self.sessions.begin() as session:
                 session.execute(delete(ConversationRow).where(ConversationRow.id == conversation_id))
 
+    def test_context_loads_more_than_twelve_messages(self):
+        conversation_id = uuid.uuid4()
+        try:
+            for index in range(8):
+                self.repository.save_turn(AssistantTurn(
+                    conversation_id=conversation_id, turn_id=uuid.uuid4(),
+                    user_text=f'Вопрос {index}', assistant_text=f'Ответ {index}',
+                    status=AssistantStatus.no_action, intent=AssistantIntent.unknown,
+                    entries=[],
+                ), None)
+            state = self.repository.get(conversation_id)
+            self.assertEqual(len(state.messages), 16)
+            self.assertEqual(state.messages[0].text, 'Вопрос 0')
+            self.assertEqual(state.messages[-1].text, 'Ответ 7')
+        finally:
+            with self.sessions.begin() as session:
+                session.execute(delete(ConversationRow).where(ConversationRow.id == conversation_id))
+
     def test_selected_meeting_survives_clarification_round_trip(self):
         conversation_id = uuid.uuid4()
         entry_id = uuid.uuid4()

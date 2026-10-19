@@ -437,6 +437,13 @@ export interface components {
              */
             request_id?: string;
         };
+        AssistantResponse: {
+            text: string;
+            /** @enum {string} */
+            status: "completed" | "needs_clarification" | "no_action";
+            entries: components["schemas"]["Entry"][];
+            suggestions?: string[];
+        };
         /**
          * @example {
          *       "conversation_id": "550e8400-e29b-41d4-a716-446655440000",
@@ -467,6 +474,8 @@ export interface components {
             entries: components["schemas"]["Entry"][];
             /** @description Короткие ответы для кнопок под сообщением («Да», «Нет», «Отмени последнее»). */
             suggestions?: string[];
+            /** @description Отдельные ответы при обработке нескольких действий одним запросом. */
+            responses?: components["schemas"]["AssistantResponse"][];
         };
         /**
          * @description Внутренний структурированный ответ внешней модели. Backend проверяет его
@@ -1067,6 +1076,13 @@ export interface operations {
             400: components["responses"]["BadRequest"];
             /** @description request_id использован с другим содержимым */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Распознанный текст превышает 1000 символов */
+            413: {
                 headers: {
                     [name: string]: unknown;
                 };

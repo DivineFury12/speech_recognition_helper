@@ -2,6 +2,8 @@
 
 import re
 
+from src.services.temporal import verify_search_query
+
 YES_WORDS = ('да', 'ага', 'угу', 'ок', 'окей', 'давай', 'конечно', 'верно', 'удаляй',
              'ставь', 'подтверждаю', 'точно', 'хорошо', 'ладно', 'yes')
 NO_WORDS = ('нет', 'неа', 'не')
@@ -17,6 +19,22 @@ UNDO_RE = re.compile(
     re.IGNORECASE,
 )
 UNDO_TEXT = 'Отмени последнее'
+BULK_MUTATION_VERB_RE = re.compile(r'\b(?:удал\w*|отмен\w*|убер\w*|сотр\w*|очист\w*)\b', re.IGNORECASE)
+BULK_QUANTIFIER_RE = re.compile(r'\b(?:все|всё|всех|кажд\w*)\b', re.IGNORECASE)
+BULK_ENTRY_RE = re.compile(r'\b(?:запис\w*|задач\w*|встреч\w*|напомин\w*|событи\w*|мероприяти\w*|дела)\b', re.IGNORECASE)
+
+
+def requests_bulk_mutation(text: str, *, has_period: bool = False) -> bool:
+    """A generic entry group and a period or 'all' indicate a batch request."""
+    if not (BULK_MUTATION_VERB_RE.search(text) and BULK_ENTRY_RE.search(text)):
+        return False
+    if not (BULK_QUANTIFIER_RE.search(text) or has_period):
+        return False
+    scope = BULK_MUTATION_VERB_RE.sub('', text)
+    # A named subject such as «встречи с Иваном» is not the whole group.
+    return verify_search_query(scope, scope, topic=True) is None
+
+
 DONE_RE = re.compile(r'^\s*(?:я\s+)?(?:уже\s+)?(?:с)?([а-яё]+(?:л|ла|ли))\s+(?P<what>.{2,}?)[.!]*\s*$', re.IGNORECASE)
 PAST_WORDS_RE = re.compile(r'\b(?:вчера|позавчера|прошл\w*)\b', re.IGNORECASE)
 COMMAND_RE = re.compile(

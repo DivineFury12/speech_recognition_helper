@@ -45,17 +45,16 @@ class SqlAlchemyConversationRepository:
             row = session.get(ConversationRow, conversation_id)
             if row is None or row.user_id != current_user():
                 return None
-            recent = list(session.scalars(
+            messages = list(session.scalars(
                 select(ConversationMessageRow)
                 .where(ConversationMessageRow.conversation_id == conversation_id)
-                .order_by(ConversationMessageRow.sequence.desc())
-                .limit(12)
+                .order_by(ConversationMessageRow.sequence)
             ))
             return ConversationState(
                 id=row.id,
                 pending_command=AssistantCommand.model_validate(row.pending_command)
                 if row.pending_command else None,
-                messages=[_message(item) for item in reversed(recent)],
+                messages=[_message(item) for item in messages],
                 last_entry_id=row.last_entry_id,
             )
 

@@ -64,6 +64,15 @@ if (-not (Test-Path (Join-Path $backend ".env"))) {
     Write-Host "Создан backend\.env — впишите ключ GigaChat в GIGACHAT_AUTH_KEY." -ForegroundColor Yellow
 }
 
+if (-not $NoVoice) {
+    $missing = & $python -c "import importlib.util; print(', '.join(name for name in ('torch', 'transformers', 'gigaam') if importlib.util.find_spec(name) is None))"
+    if ($LASTEXITCODE -ne 0 -or $missing) {
+        Write-Host "Не установлены зависимости голосового режима: $missing" -ForegroundColor Red
+        Write-Host "Установите torch и gigaam по инструкции в README или запустите текстовый режим: .\run.ps1 -Prod -NoVoice" -ForegroundColor Yellow
+        exit 1
+    }
+}
+
 if (-not (Test-Path (Join-Path $frontend "node_modules"))) {
     Step "Устанавливаю зависимости фронтенда"
     Push-Location $frontend; npm install; Pop-Location

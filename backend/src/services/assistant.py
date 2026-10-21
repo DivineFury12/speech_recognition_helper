@@ -25,7 +25,7 @@ from src.services.guards import (CHOICE_WORDS, DONE_RE, HELP_SUGGESTIONS, HELP_T
                                  requests_bulk_mutation, yes_no)
 from src.services.recurrence import find_recurrence, first_date, next_occurrence
 from src.services.batch import TOPIC_LIST_RX, apply_filter, bulk_filter, expand_creations
-from src.services.guards import COMPLETE_PHRASE_RE, SAME_AS_RE, UNDATED_RE
+from src.services.guards import COMPLETE_PHRASE_RE, SAME_AS_RE, SMALL_TALK_RE, UNDATED_RE
 from src.user_context import current_user
 from src.services.temporal import (ambiguous_time_options, ambiguous_time_phrase,
                                    daypart_of_time, mentioned_entry_kind, parse_date, parse_daypart, parse_duration,
@@ -724,6 +724,22 @@ class AssistantService:
             if turn is not None:
                 return turn, state
             return None, dataclasses.replace(state, pending_command=None)
+        small_talk = SMALL_TALK_RE.fullmatch(text.strip(' !.?,)').casefold().replace('ё', 'е'))
+        if small_talk:
+            command = AssistantCommand(action=AssistantIntent.unknown)
+            word = small_talk.lastgroup
+            reply = {
+                'hello': 'Привет! Я веду задачи, встречи и напоминания. Скажите, например, '
+                         '«Напомни завтра в 10:00 позвонить Ивану» или «Что у меня сегодня?»',
+                'thanks': 'Пожалуйста! Если нужно что-то ещё запланировать — говорите.',
+                'how': 'Всё отлично, готов помогать. Что запланируем?',
+                'bye': 'До встречи! Записи сохранены.',
+            }[word]
+            if previous is not None:
+                question = next((m.text for m in reversed(state.messages) if m.role == 'assistant'), '')
+                return self._turn(conversation_id, text, previous, f'{reply}\n{question}'.strip(),
+                                  AssistantStatus.needs_clarification, [], previous), state
+            return self._turn(conversation_id, text, command, reply, AssistantStatus.no_action, []), state
         if previous is None and yes_no(text) and len(text.split()) <= 2:
             command = AssistantCommand(action=AssistantIntent.unknown)
             return self._turn(conversation_id, text, command,
@@ -1378,6 +1394,19 @@ class AssistantService:
                 same.update({'target_time': None, 'target_time_phrase': None})
             if same:
                 command = command.model_copy(update=same)
+            after_na = re.search(r'\bна\s+(?P<when>[^,;]+)$', text, re.IGNORECASE)
+            new_date = parse_date(after_na.group('when'), today) if after_na else None
+            if new_date is not None and command.date is None and command.target_date in (None, new_date):
+                # «Сделай последнюю запись на 24 12 2027»: the date after «на» is the new one.
+                command = command.model_copy(update={
+                    'date': new_date, 'date_phrase': after_na.group('when').strip(),
+                    'target_date': None, 'target_date_phrase': None, 'move_intent': True,
+                })
+            if (command.target_query is None and command.target_date is None and command.target_time is None
+                    and (command.date is not None or command.time is not None or command.shift_minutes)
+                    and state is not None and state.last_entry_id is not None):
+                # «Перенеси на 12 03 2027» right after talking about a record: that record is meant.
+                pronoun_reference = True
         if (command.action in (AssistantIntent.update_entry, AssistantIntent.delete_entry)
                 and ONLY_THIS_RE.search(text)):
             # Keep «только эту» through clarifications: the reply «да» no longer contains the word.

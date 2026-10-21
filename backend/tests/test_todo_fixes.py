@@ -110,3 +110,17 @@ class ContextTests(unittest.TestCase):
         moved = chat('А перенеси его на завтра в 5 вечера')
         self.assertEqual(moved.status, AssistantStatus.completed)
         self.assertEqual((moved.entries[0].date.isoformat(), moved.entries[0].time), (tomorrow, '17:00'))
+
+
+class SmallTalkAndSpacedDates(unittest.TestCase):
+    def test_greeting_is_not_a_new_record(self):
+        chat = Chat([command(action='create_entry', kind='task', title='здарова')])
+        turn = chat('здарова')
+        self.assertEqual(turn.status, AssistantStatus.no_action)
+        self.assertIn('Привет', turn.assistant_text)
+        self.assertEqual(chat.repository.items, [])
+
+    def test_spaced_date_with_year(self):
+        self.assertEqual(parse_date('на 24 12 2027', WEDNESDAY), datetime.date(2027, 12, 24))
+        self.assertIsNone(parse_date('встреча 24 12', WEDNESDAY))
+        self.assertIsNone(parse_date('встреча на 10-15 минут', WEDNESDAY))

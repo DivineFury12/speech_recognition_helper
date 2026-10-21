@@ -178,6 +178,10 @@ def parse_date(phrase: str, today: datetime.date) -> datetime.date | None:
             int(iso.group(3)), int(iso.group(2)), int(iso.group(1)), today,
         )
 
+    spaced = re.search(r'(?<![\d:])(\d{1,2})\s+(\d{1,2})\s+(\d{4})(?![\d:])', value)
+    if spaced and 1 <= int(spaced.group(2)) <= 12:
+        # «24 12 2027» — a date typed with spaces; the four-digit year makes it unambiguous.
+        return _calendar_date(int(spaced.group(1)), int(spaced.group(2)), int(spaced.group(3)), today)
     numeric = re.search(r'(?<!\d)(\d{1,2})[./](\d{1,2})(?:[./](\d{2,4}))?(?!\d)', value)
     if numeric:
         return _calendar_date(
@@ -418,8 +422,12 @@ def parse_period(text: str, today: datetime.date) -> tuple[datetime.date, dateti
     return None
 
 
+SPACED_DATE_RE = re.compile(r'(?<![\d:])\d{1,2}\s+\d{1,2}\s+\d{4}(?![\d:])')
+
+
 def parse_time(phrase: str) -> str | None:
-    value = phrase.casefold().replace('ё', 'е')
+    # «12 03 2027» is a date: its numbers must not be read as «в 12».
+    value = SPACED_DATE_RE.sub(' ', phrase.casefold().replace('ё', 'е'))
     if 'полноч' in value:
         return '00:00'
     if 'полден' in value or 'полдн' in value:
@@ -500,7 +508,7 @@ def daypart_of_time(value: str) -> str:
 
 def ambiguous_time_phrase(text: str) -> str | None:
     """Find a spoken 1–11 o'clock without a morning/evening qualifier."""
-    value = text.casefold().replace('ё', 'е')
+    value = SPACED_DATE_RE.sub(' ', text.casefold().replace('ё', 'е'))
     if re.search(r'\b(?:[01]?\d|2[0-3]):[0-5]\d\b', value):
         # An exact «16:00» settles the time; «на 3 символа» elsewhere is not an hour.
         return None

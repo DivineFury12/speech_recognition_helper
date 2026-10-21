@@ -3,6 +3,7 @@ import contextlib
 import threading
 
 import fastapi
+import fastapi.exceptions
 import fastapi.responses
 import fastapi.staticfiles
 from fastapi.middleware.cors import CORSMiddleware
@@ -224,6 +225,23 @@ def create_app(settings: src.settings.Settings | None = None) -> fastapi.FastAPI
             status_code=500,
             content={'detail': 'Ошибка при распознавании аудио'},
         )
+
+    @app.exception_handler(fastapi.exceptions.RequestValidationError)
+    async def handle_validation_error(
+        request: fastapi.Request,
+        exc: fastapi.exceptions.RequestValidationError,
+    ) -> fastapi.responses.JSONResponse:
+        errors = exc.errors()
+        if any(err.get('type') == 'string_too_long' and 'text' in err.get('loc', ()) for err in errors):
+            detail = 'Сообщение слишком длинное: не больше 1000 символов. Сократите его и отправьте ещё раз.'
+        else:
+            parts = []
+            for err in errors:
+                field = '.'.join(str(x) for x in err.get('loc', ()) if x not in ('body', 'query', 'path', 'form'))
+                message = str(err.get('msg', '')).removeprefix('Value error, ')
+                parts.append(f'{field}: {message}' if field else message)
+            detail = '; '.join(parts) or 'Некорректный запрос'
+        return fastapi.responses.JSONResponse(status_code=422, content={'detail': detail})
 
     @app.exception_handler(src.services.assistant.InvalidTimezoneError)
     async def handle_invalid_timezone(

@@ -220,11 +220,11 @@ class CommandInterpreter:
             if explicit_duration is not None:
                 command = command.model_copy(update={'duration_minutes': explicit_duration})
 
-        pronoun_reference = command.target_reference_phrase is not None or (
-            lexical_fallback and bool(re.search(
-                r'\b(?:её|ее|его|эту|этот)\b', text.casefold(),
-            ))
-        )
+        # «Перенеси его», «удали её»: a pronoun in the user's words always points at the record under
+        # discussion, even when the model did not mark target_reference_phrase.
+        pronoun_reference = command.target_reference_phrase is not None or bool(re.search(
+            r'\b(?:её|ее|его|неё|нее|него|эту|этот|эта|это)\b', text.casefold(),
+        )) and command.target_query is None
         bound_target = (previous is not None and previous.selected_entry_id is not None) or (
             state is not None and state.last_entry_id is not None and pronoun_reference
         )

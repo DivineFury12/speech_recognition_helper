@@ -58,7 +58,7 @@ DURATION_MARKER_UPDATE = re.compile(
 HOUR_PATTERN = '|'.join(sorted((re.escape(word) for word in HOUR_WORDS), key=len, reverse=True))
 HOUR_PATTERN = rf'(?:\d{{1,2}}|{HOUR_PATTERN})'
 COUNT_PATTERN = rf'(?:\d{{1,4}}|{HOUR_PATTERN})'
-DATE_UNIT_PATTERN = r'(?P<unit>недел\w*|день|дня|дней|сутк\w*|суток)'
+DATE_UNIT_PATTERN = r'(?P<unit>недел\w*|день|дня|дней|сутк\w*|суток|месяц\w*|год\w*|лет)'
 MONTH_PATTERN = '|'.join(
     [rf'{stem}\w*' for stem in MONTHS if not stem.startswith('ма')]
     + [r'ма[йяею]']
@@ -86,7 +86,10 @@ TITLE_STOPWORDS = {
 def _in_text(phrase: str | None, text: str) -> bool:
     if not phrase:
         return False
-    return ' '.join(phrase.casefold().split()) in ' '.join(text.casefold().split())
+    needle = ' '.join(phrase.casefold().split())
+    haystack = ' '.join(text.casefold().split())
+    # Whole words only: «завтра» must not be found inside «послезавтра».
+    return re.search(rf'(?<![\w]){re.escape(needle)}(?![\w])', haystack) is not None
 
 
 def _month_number(token: str) -> int:
@@ -128,6 +131,14 @@ def _next_day_of_month(day: int, today: datetime.date) -> datetime.date | None:
 def _relative_date(today: datetime.date, count: str | None, unit: str) -> datetime.date | None:
     amount = (1 if count is None else 2 if count in ('пару', 'пара') else
               int(count) if count.isdigit() else HOUR_WORDS[count])
+    if unit.startswith(('месяц', 'год', 'лет')):
+        months = amount * (12 if unit.startswith(('год', 'лет')) else 1)
+        index = today.month - 1 + months
+        year, month = today.year + index // 12, index % 12 + 1
+        try:
+            return datetime.date(year, month, min(today.day, calendar.monthrange(year, month)[1]))
+        except ValueError:
+            return None
     days = amount * (7 if unit.startswith('недел') else 1)
     try:
         return today + datetime.timedelta(days=days)
@@ -360,6 +371,11 @@ def parse_period(text: str, today: datetime.date) -> tuple[datetime.date, dateti
     if re.search(r'\b(?:на|за|в)\s+прошл\w*\s+недел\w*\b', value):
         start = today - datetime.timedelta(days=today.weekday() + 7)
         return start, start + datetime.timedelta(days=6)
+    if re.search(r'\b(?:эт\w*|текущ\w*)\s+недел\w*\b', value) and re.search(r'\bполовин\w*', value):
+        start = today - datetime.timedelta(days=today.weekday())
+        if re.search(r'\b(?:втор\w*|2-?й)\s+половин\w*\b', value):
+            return max(today, start + datetime.timedelta(days=3)), start + datetime.timedelta(days=6)
+        return start, start + datetime.timedelta(days=2)
     if re.search(r'\b(?:на|за|в)\s+(?:эт\w*|текущ\w*)\s+недел\w*\b', value):
         start = today - datetime.timedelta(days=today.weekday())
         return start, start + datetime.timedelta(days=6)
@@ -485,9 +501,14 @@ def daypart_of_time(value: str) -> str:
 def ambiguous_time_phrase(text: str) -> str | None:
     """Find a spoken 1–11 o'clock without a morning/evening qualifier."""
     value = text.casefold().replace('ё', 'е')
+    if re.search(r'\b(?:[01]?\d|2[0-3]):[0-5]\d\b', value):
+        # An exact «16:00» settles the time; «на 3 символа» elsewhere is not an hour.
+        return None
     match = re.search(
         rf'\b(?:в|к|на)\s+(?P<hour>{HOUR_PATTERN})\b'
-        rf'(?!:\d|\s+(?:{MONTH_PATTERN}|минут\w*|дн\w*|утра\b|дня\b|вечера\b|ночи\b))',
+        rf'(?!:\d|\s+(?:{MONTH_PATTERN}|минут\w*|дн\w*|утра\b|дня\b|вечера\b|ночи\b|символ\w*|раз\w*|'
+        rf'процент\w*|человек\w*|штук\w*|страниц\w*|задач\w*|рубл\w*|балл\w*|пункт\w*|недел\w*|месяц\w*|'
+        rf'год\w*|лет\b|часа?\b|часов\b))',
         value,
     )
     if match is None:

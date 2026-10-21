@@ -41,6 +41,12 @@ class RecurringRepository(FakeRepository):
                            embedding=embedding, embedding_model=embedding_model,
                            duration_minutes=duration_minutes, recurrence=recurrence, **extra), True
 
+    def all_entries(self):
+        return list(self.items)
+
+    def list_undated(self):
+        return [entry for entry in self.items if entry.date is None]
+
     def restore(self, entry):
         self.items.append(entry)
         return entry

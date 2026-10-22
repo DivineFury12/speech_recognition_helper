@@ -5,7 +5,8 @@ import unittest
 
 from src.schemas.assistant import AssistantStatus, EntryKind, EntryStatus, Recurrence
 from src.services import assistant as assistant_module
-from src.services.guards import find_until
+from src.services.guards import DONE_RE, find_until
+from src.services.recurrence import find_interval, label, occurrences
 from src.services.spoken import impossible_date, normalize_request, relative_minutes, spoken_time
 from tests.test_our_features import NOW, TODAY, Chat, command
 
@@ -185,6 +186,79 @@ class FollowUpTests(unittest.TestCase):
         chat('нет, не эту, а ту что в 15:00')
         chat('да')
         self.assertEqual([e.title for e in chat.repository.items], ['Встреча с Петром'])
+
+
+class IntervalAndRangeTests(unittest.TestCase):
+    def test_interval_phrases_and_labels(self):
+        for text, expected in [('каждые 3 дня', (Recurrence.daily, 3)), ('раз в 2 недели', (Recurrence.weekly, 2)),
+                               ('каждые два месяца', (Recurrence.monthly, 2)), ('через день', (Recurrence.daily, 2)),
+                               ('каждые 2 часа', ('hours', 2)), ('каждый день', None)]:
+            with self.subTest(text=text):
+                self.assertEqual(find_interval(text), expected)
+        self.assertEqual(label(Recurrence.daily, 3), 'раз в 3 дня')
+        self.assertEqual(label(Recurrence.weekly, 5), 'раз в 5 недель')
+        self.assertEqual(label(Recurrence.weekly, 1), 'каждую неделю')
+
+    def test_interval_occurrences(self):
+        start = datetime.date(2026, 10, 1)
+        self.assertEqual(occurrences(start, Recurrence.daily, datetime.date(2026, 10, 5), datetime.date(2026, 10, 12), 3),
+                         [datetime.date(2026, 10, 7), datetime.date(2026, 10, 10)])
+        self.assertEqual(occurrences(start, Recurrence.weekly, start, datetime.date(2026, 10, 31), 2),
+                         [start, datetime.date(2026, 10, 15), datetime.date(2026, 10, 29)])
+        self.assertEqual(occurrences(start, Recurrence.monthly, start, datetime.date(2027, 3, 1), 2),
+                         [start, datetime.date(2026, 12, 1), datetime.date(2027, 2, 1)])
+
+    def test_time_range_becomes_duration_but_date_range_does_not(self):
+        self.assertEqual(normalize_request('встреча завтра с 14 до 16'), 'встреча завтра в 14:00 на 120 минут')
+        self.assertEqual(normalize_request('с 5 до 7 вечера'), 'в 17:00 на 120 минут')
+        self.assertEqual(normalize_request('отпуск с 10 до 12 декабря'), 'отпуск с 10 до 12 декабря')
+
+    def test_imperative_delete_is_not_a_past_tense_report(self):
+        self.assertIsNone(DONE_RE.match('Удали задачу купить хлеб'))
+        self.assertIsNotNone(DONE_RE.match('я купил хлеб'))
+
+
+class ScheduleCommandTests(unittest.TestCase):
+    def test_free_windows(self):
+        chat = Chat([])
+        seed(chat, EntryKind.meeting, 'Планёрка', TOMORROW, '10:00')
+        seed(chat, EntryKind.meeting, 'Обед', TOMORROW, '13:00')
+        answer = chat('Когда я свободен завтра?').assistant_text
+        for window in ('09:00–10:00', '11:00–13:00', '14:00–21:00'):
+            self.assertIn(window, answer)
+
+    def test_plain_list_needs_no_model(self):
+        chat = Chat([])
+        seed(chat, EntryKind.meeting, 'Планёрка', TOMORROW, '10:00')
+        turn = chat('Что у меня завтра?')
+        self.assertEqual(turn.status, AssistantStatus.completed)
+        self.assertIn('Планёрка', turn.assistant_text)
+
+    def test_interval_series_from_phrase(self):
+        chat = Chat([command(action='create_entry', kind='reminder', title='Напоминай поливать цветы каждые 3 дня',
+                             date=None, time='10:00', time_phrase='в 10:00')])
+        turn = chat('Напоминай поливать цветы каждые 3 дня в 10:00')
+        entry = chat.repository.items[0]
+        self.assertEqual((entry.title, entry.recurrence, entry.recurrence_interval),
+                         ('Поливать цветы', Recurrence.daily, 3))
+        self.assertIn('раз в 3 дня', turn.assistant_text)
+        self.assertIn('раз в 2 недели', chat('сделай его раз в 2 недели').assistant_text)
+        other = Chat([command(action='create_entry', kind='reminder', title='Поливать цветы 3 дня',
+                              date=None, time='10:00', time_phrase='в 10:00')])
+        other('Напоминай поливать цветы каждые 3 дня в 10:00')
+        self.assertEqual(other.repository.items[0].title, 'Поливать цветы')
+
+    def test_hourly_repeat_is_declined(self):
+        chat = Chat([])
+        self.assertIn('чаще раза в день', chat('Напоминай пить воду каждые 2 часа').assistant_text)
+        self.assertEqual(chat.repository.items, [])
+
+    def test_occurrence_of_a_series_is_found_by_its_date(self):
+        chat = Chat([])
+        entry = seed(chat, EntryKind.reminder, 'Стирка', TODAY, '15:00')
+        chat.repository.items[0] = entry.model_copy(update={'recurrence': Recurrence.daily})
+        found, exact = chat.entries.find_candidates('стирку', date=TOMORROW)
+        self.assertEqual([e.title for e in found], ['Стирка'])
 
 
 if __name__ == '__main__':

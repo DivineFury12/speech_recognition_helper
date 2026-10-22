@@ -3,7 +3,7 @@
 import datetime
 
 from src.schemas.assistant import Entry, EntryKind
-from src.services.recurrence import LABEL
+from src.services.recurrence import label
 
 MONTHS_GEN = ('января', 'февраля', 'марта', 'апреля', 'мая', 'июня', 'июля',
               'августа', 'сентября', 'октября', 'ноября', 'декабря')
@@ -41,7 +41,7 @@ def end_time(entry: Entry) -> str | None:
 
 def when(entry: Entry, today: datetime.date) -> str:
     if entry.recurrence is not None:
-        parts = [LABEL[entry.recurrence]]
+        parts = [label(entry.recurrence, entry.recurrence_interval)]
         if entry.time:
             parts.append(f'в {entry.time}')
         return ' '.join(parts)
@@ -75,7 +75,7 @@ def entry_line(entry: Entry, today: datetime.date, *, show_date: bool) -> str:
         parts.append(entry.time)
     head = ' '.join(parts)
     done = ' ✓' if entry.status is not None and entry.status.value == 'completed' else ''
-    repeat = f', {LABEL[entry.recurrence]}' if entry.recurrence else ''
+    repeat = f', {label(entry.recurrence, entry.recurrence_interval)}' if entry.recurrence else ''
     if getattr(entry.priority, 'value', entry.priority) == 'high':
         repeat += ', важно'
     body = f'{entry.title} ({KIND_NOM[entry.kind]}{repeat}){done}'

@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from src.ports.embeddings import EmbeddingModel, EmbeddingUnavailableError
 from src.ports.entries import EntryRepository
 from src.schemas.assistant import Entry, EntryKind, EntryStatus, EntryUpdate, Recurrence
+from src.services.recurrence import occurrences
 
 
 logger = logging.getLogger(__name__)
@@ -122,8 +123,18 @@ class EntryService:
         else:
             return [], False
         matches = [entry for entry in matches if
-                   (date is None or entry.date == date) and
+                   (date is None or entry.date == date or (
+                       entry.recurrence and entry.date is not None
+                       and occurrences(entry.date, entry.recurrence, date, date, entry.recurrence_interval or 1)
+                       and not (entry.recurrence_until and date > entry.recurrence_until))) and
                    (time is None or entry.time == time)]
+        if query and not exact and matches:
+            # «Перенеси распитие напитков»: the same words as the title are not a guess.
+            wanted = self._search_stems(re.sub(r'^(?:задач\w*|встреч\w*|напоминани\w*|запис\w*)\s+', '',
+                                               query.strip(), flags=re.IGNORECASE))
+            same = [entry for entry in matches if wanted and self._search_stems(entry.title) == wanted]
+            if len(same) == 1:
+                return same, True
         return matches[:limit], exact
 
     @staticmethod

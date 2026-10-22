@@ -53,6 +53,7 @@ class SqlAlchemyEntryRepository:
                 duration_minutes=entry.duration_minutes,
                 recurrence=entry.recurrence.value if entry.recurrence else None,
                 recurrence_until=entry.recurrence_until, remind_minutes=entry.remind_minutes,
+                recurrence_interval=entry.recurrence_interval,
                 priority=getattr(entry.priority, 'value', entry.priority),
                 exdates=[d.isoformat() for d in entry.exdates] if entry.exdates else None,
                 status=(entry.status or EntryStatus.pending).value, created_at=entry.created_at,
@@ -143,6 +144,7 @@ class SqlAlchemyEntryRepository:
         remind_minutes: int | None = None,
         recurrence_until: datetime.date | None = None,
         priority: str | None = None,
+        recurrence_interval: int | None = None,
     ) -> Entry:
         with database_session(self._sessions, write=True) as session:
             return self._insert(
@@ -150,6 +152,7 @@ class SqlAlchemyEntryRepository:
                 timezone=timezone, embedding=embedding, embedding_model=embedding_model,
                 duration_minutes=duration_minutes, recurrence=recurrence,
                 remind_minutes=remind_minutes, recurrence_until=recurrence_until, priority=priority,
+                recurrence_interval=recurrence_interval,
             )
 
     @staticmethod
@@ -159,14 +162,14 @@ class SqlAlchemyEntryRepository:
         embedding: list[float] | None, embedding_model: str | None,
         duration_minutes: int | None = None, recurrence: Recurrence | None = None,
         remind_minutes: int | None = None, recurrence_until: datetime.date | None = None,
-        priority: str | None = None,
+        priority: str | None = None, recurrence_interval: int | None = None,
     ) -> Entry:
         row = EntryRow(
             id=uuid.uuid4(), user_id=current_user(), kind=kind.value, title=title, date=date,
             time=time, timezone=timezone, duration_minutes=duration_minutes,
             recurrence=recurrence.value if recurrence else None,
             remind_minutes=remind_minutes, recurrence_until=recurrence_until,
-            priority=getattr(priority, 'value', priority),
+            priority=getattr(priority, 'value', priority), recurrence_interval=recurrence_interval,
             status=EntryStatus.pending.value,
         )
         session.add(row)
@@ -186,6 +189,7 @@ class SqlAlchemyEntryRepository:
         embedding_model: str | None, duration_minutes: int | None = None,
         recurrence: Recurrence | None = None, remind_minutes: int | None = None,
         recurrence_until: datetime.date | None = None, priority: str | None = None,
+        recurrence_interval: int | None = None,
     ) -> tuple[Entry, bool]:
         normalized_title = ' '.join(title.casefold().split())
         user_id = current_user()
@@ -216,6 +220,7 @@ class SqlAlchemyEntryRepository:
                 timezone=timezone, embedding=embedding, embedding_model=embedding_model,
                 duration_minutes=duration_minutes, recurrence=recurrence,
                 remind_minutes=remind_minutes, recurrence_until=recurrence_until, priority=priority,
+                recurrence_interval=recurrence_interval,
             ), True
 
     def list_period(
@@ -241,7 +246,7 @@ class SqlAlchemyEntryRepository:
         for entry in rows:
             last = min(date_to, entry.recurrence_until) if entry.recurrence_until else date_to
             skipped = set(entry.exdates or [])
-            for day in occurrences(entry.date, entry.recurrence, date_from, last):
+            for day in occurrences(entry.date, entry.recurrence, date_from, last, entry.recurrence_interval or 1):
                 if day in skipped:
                     continue
                 result.append(entry if day == entry.date else entry.model_copy(update={'date': day}))

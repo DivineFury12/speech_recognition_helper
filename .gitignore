@@ -40,3 +40,4 @@ env/
 Thumbs.db
 /backend/data/
 /backend/.cache/
+.live_eval.json

@@ -603,6 +603,7 @@ export interface components {
              * @description Последний день повторяющейся серии; null — без конца.
              */
             recurrence_until?: string | null;
+            recurrence_interval?: number | null;
             /** @description Даты, в которые повтор пропущен («удали только эту планёрку»). */
             exdates?: string[] | null;
             /** @description За сколько минут до начала напомнить; null — по умолчанию. */
@@ -634,6 +635,7 @@ export interface components {
             priority?: components["schemas"]["Priority"];
             /** Format: date */
             recurrence_until?: string | null;
+            recurrence_interval?: number | null;
         };
         EntryUpdate: {
             title?: string;
@@ -648,6 +650,7 @@ export interface components {
              * @description Последний день повторяющейся серии; null — без конца.
              */
             recurrence_until?: string | null;
+            recurrence_interval?: number | null;
             /** @description Даты, в которые повтор пропущен («удали только эту планёрку»). */
             exdates?: string[] | null;
             /** @description За сколько минут до начала напомнить; null — по умолчанию. */

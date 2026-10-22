@@ -58,6 +58,7 @@ class Entry(pydantic.BaseModel):
     duration_minutes: int | None = None
     recurrence: Recurrence | None = None
     recurrence_until: datetime.date | None = None
+    recurrence_interval: int | None = None
     exdates: list[datetime.date] | None = None
     remind_minutes: int | None = None
     priority: Priority | None = None
@@ -80,6 +81,7 @@ class EntryUpdate(pydantic.BaseModel):
     duration_minutes: int | None = pydantic.Field(default=None, ge=1, le=1440)
     recurrence: Recurrence | None = None
     recurrence_until: datetime.date | None = None
+    recurrence_interval: int | None = pydantic.Field(default=None, ge=1, le=365)
     exdates: list[datetime.date] | None = None
     remind_minutes: int | None = pydantic.Field(default=None, ge=0, le=10080)
     priority: Priority | None = None
@@ -111,6 +113,7 @@ class EntryCreate(pydantic.BaseModel):
     remind_minutes: int | None = pydantic.Field(default=None, ge=0, le=10080)
     priority: Priority | None = None
     recurrence_until: datetime.date | None = None
+    recurrence_interval: int | None = pydantic.Field(default=None, ge=1, le=365)
 
     @pydantic.model_validator(mode='after')
     def validate_create(self) -> 'EntryCreate':

@@ -123,6 +123,7 @@ class AssistantCommand(pydantic.BaseModel):
     remind_minutes: int | None = None
     recurrence_until: datetime.date | None = None
     priority: str | None = None
+    recurrence_interval: int | None = None
 
     @pydantic.field_validator('title', 'query', 'date_phrase', 'time_phrase',
                              'duration_phrase', 'target_query', 'target_date_phrase',
@@ -169,7 +170,7 @@ class AssistantCommand(pydantic.BaseModel):
                      'date_unverified', 'time_unverified', 'date_window_start',
                      'date_window_end', 'preferred_daypart',
                      'confirm_entry_id', 'forced', 'shift_minutes', 'remind_minutes',
-                     'recurrence_until', 'priority'):
+                     'recurrence_until', 'priority', 'recurrence_interval'):
             schema['properties'].pop(name)
         schema['required'] = list(schema['properties'])
         return schema

@@ -18,6 +18,22 @@ const REPEAT_LABEL: Record<NonNullable<Recurrence>, string> = {
   monthly: 'каждый месяц',
 }
 
+const STEP_UNIT: Record<string, [string, string, string]> = {
+  daily: ['день', 'дня', 'дней'],
+  weekly: ['неделю', 'недели', 'недель'],
+  monthly: ['месяц', 'месяца', 'месяцев'],
+}
+
+const repeatLabel = computed(() => {
+  const rule = props.entry.recurrence
+  if (!rule) return ''
+  const n = props.entry.recurrence_interval ?? 1
+  const unit = STEP_UNIT[rule]
+  if (n <= 1 || !unit) return REPEAT_LABEL[rule]
+  const tail = n % 100 >= 11 && n % 100 <= 14 ? 5 : n % 10
+  return `раз в ${n} ${tail === 1 ? unit[0] : tail >= 2 && tail <= 4 ? unit[1] : unit[2]}`
+})
+
 const done = computed(() => props.entry.status === 'completed')
 const important = computed(() => props.entry.priority === 'high')
 
@@ -110,7 +126,7 @@ function openCard() {
           <span class="card-meta">
             <span class="kind-dot" aria-hidden="true" />{{ KIND_LABEL[entry.kind] }}
             <template v-if="showDate && entry.date"> · {{ formatDate(entry.date) }}</template>
-            <template v-if="entry.recurrence"> · ↻ {{ REPEAT_LABEL[entry.recurrence] }}</template>
+            <template v-if="entry.recurrence"> · ↻ {{ repeatLabel }}</template>
             <template v-if="lead"> · напомню {{ lead }}</template>
           </span>
         </span>

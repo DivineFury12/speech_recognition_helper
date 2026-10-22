@@ -44,11 +44,29 @@ def _add_months(day: datetime.date, months: int) -> datetime.date:
 
 
 def occurrences(start: datetime.date, rule: Recurrence | str | None,
-                date_from: datetime.date, date_to: datetime.date) -> list[datetime.date]:
+                date_from: datetime.date, date_to: datetime.date, interval: int = 1) -> list[datetime.date]:
     if not rule:
         return [start] if date_from <= start <= date_to else []
     rule = Recurrence(rule)
     result: list[datetime.date] = []
+    if interval > 1 and rule in (Recurrence.daily, Recurrence.weekly):
+        step = datetime.timedelta(days=interval * (7 if rule == Recurrence.weekly else 1))
+        skip = max(0, (date_from - start).days // step.days)
+        day = start + step * skip
+        while day <= date_to:
+            if day >= date_from:
+                result.append(day)
+            day += step
+        return result
+    if interval > 1 and rule == Recurrence.monthly:
+        months = 0
+        while True:
+            day = _add_months(start, months)
+            months += interval
+            if day > date_to:
+                return result
+            if day >= date_from:
+                result.append(day)
     if rule in (Recurrence.daily, Recurrence.weekdays):
         day = max(start, date_from)
         while day <= date_to:
@@ -75,6 +93,43 @@ def occurrences(start: datetime.date, rule: Recurrence | str | None,
     return result
 
 
-def next_occurrence(start: datetime.date, rule: Recurrence | str, after: datetime.date) -> datetime.date | None:
-    found = occurrences(start, rule, after + datetime.timedelta(days=1), after + datetime.timedelta(days=400))
+def next_occurrence(start: datetime.date, rule: Recurrence | str, after: datetime.date,
+                    interval: int = 1) -> datetime.date | None:
+    found = occurrences(start, rule, after + datetime.timedelta(days=1), after + datetime.timedelta(days=400), interval)
     return found[0] if found else None
+
+
+_NUMBERS = {'два': 2, 'две': 2, 'три': 3, 'четыре': 4, 'пять': 5, 'шесть': 6, 'семь': 7, 'десять': 10}
+INTERVAL_RE = re.compile(
+    r'\b(?:кажд\w+|раз\s+в)\s+(?P<n>\d{1,3}|два|две|три|четыре|пять|шесть|семь|десять)\s+'
+    r'(?P<unit>дн\w*|день|недел\w*|месяц\w*|час\w*|минут\w*)'
+    r'|\b(?P<other>через\s+день|через\s+недел[юь])\b',
+    re.IGNORECASE,
+)
+
+
+def find_interval(text: str) -> tuple[Recurrence | str, int] | None:
+    """«каждые 3 дня» → (daily, 3), «раз в 2 недели» → (weekly, 2), «каждые 2 часа» → ('hours', 2)."""
+    match = INTERVAL_RE.search(text.casefold().replace('ё', 'е'))
+    if match is None:
+        return None
+    if match.group('other'):
+        return (Recurrence.daily, 2) if 'день' in match.group('other') else (Recurrence.weekly, 2)
+    token = match.group('n')
+    number = int(token) if token.isdigit() else _NUMBERS[token]
+    unit = match.group('unit')
+    if unit.startswith(('час', 'минут')):
+        return 'hours', number
+    rule = (Recurrence.daily if unit.startswith(('дн', 'день')) else
+            Recurrence.weekly if unit.startswith('недел') else Recurrence.monthly)
+    return rule, number
+
+
+def label(rule: Recurrence, interval: int | None = None) -> str:
+    if not interval or interval == 1:
+        return LABEL[rule]
+    forms = {Recurrence.daily: ('день', 'дня', 'дней'), Recurrence.weekly: ('неделю', 'недели', 'недель'),
+             Recurrence.monthly: ('месяц', 'месяца', 'месяцев')}[rule]
+    tail = interval % 10 if interval % 100 not in range(11, 15) else 5
+    word = forms[0] if tail == 1 else forms[1] if 2 <= tail <= 4 else forms[2]
+    return f'раз в {interval} {word}'

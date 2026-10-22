@@ -1117,7 +1117,7 @@ class AssistantServiceTests(unittest.TestCase):
                 'signals_verified', 'date_unverified', 'time_unverified',
                 'date_window_start', 'date_window_end', 'preferred_daypart',
                 'recurrence', 'confirm', 'confirm_entry_id', 'forced', 'shift_minutes',
-                'remind_minutes', 'recurrence_until', 'priority',
+                'remind_minutes', 'recurrence_until', 'priority', 'recurrence_interval',
             },
         )
 

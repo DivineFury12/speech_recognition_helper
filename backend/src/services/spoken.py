@@ -104,6 +104,27 @@ NOT_THIS_RE = re.compile(r'^\s*(?:нет\s*,?\s*)?не\s+(?:эту|этот|эт
 CREATE_THIS_RE = re.compile(r'(?i)\b(поставь|создай|запланируй|добавь|напомни\s+про)\s+(?:эт[уоа]|этот)\s+')
 SPACED_TIME_RE = re.compile(r'\b(в|на|к|до|с)\s+([01]?\d|2[0-3])\s+(00|05|10|15|20|25|30|35|40|45|50|55)\b(?!\s*\d)',
                             re.IGNORECASE)
+FROM_TO_RE = re.compile(
+    r'\bс\s+([01]?\d|2[0-3])(?::([0-5]\d))?\s+до\s+([01]?\d|2[0-3])(?::([0-5]\d))?'
+    r'(?:\s+(утра|дня|вечера))?\b(?!\s*(?:[:.]\d|числа|' + '|'.join(
+        ('января', 'февраля', 'марта', 'апреля', 'мая', 'июня', 'июля', 'августа', 'сентября', 'октября',
+         'ноября', 'декабря')) + r'))',
+    re.IGNORECASE,
+)
+
+
+def _from_to(match: re.Match) -> str:
+    """«с 14 до 16» → «в 14:00 на 120 минут»; «с 10 до 12 декабря» is a date range and is left alone."""
+    start_h, end_h = int(match.group(1)), int(match.group(3))
+    start_m, end_m = int(match.group(2) or 0), int(match.group(4) or 0)
+    if match.group(5) in ('дня', 'вечера') and end_h < 12:
+        start_h, end_h = (start_h + 12 if start_h < 12 else start_h), end_h + 12
+    minutes = (end_h * 60 + end_m) - (start_h * 60 + start_m)
+    if not 0 < minutes <= 12 * 60:
+        return match.group(0)
+    return f'в {start_h:02d}:{start_m:02d} на {minutes} минут'
+
+
 GREETINGS = ('привет', 'приветик', 'здравствуй', 'здравствуйте', 'здорово', 'здарова', 'здрасьте', 'хай')
 NOT_GREETING_RE = re.compile(r'^(?:привез|привоз|привед|привяз|привык|привлек|привил|привет\w*ств)', re.IGNORECASE)
 
@@ -133,6 +154,7 @@ def normalize_request(text: str) -> str:
         value = re.sub(pattern, word, value, flags=re.IGNORECASE)
     value = INTERJECTIONS_RE.sub('', value)
     value = SPACED_TIME_RE.sub(lambda m: f"{m.group(1)} {m.group(2)}:{m.group(3)}", value)
+    value = FROM_TO_RE.sub(_from_to, value)
     value = _drop_greeting(value)
     return ' '.join(value.split()) or text
 

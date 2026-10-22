@@ -35,7 +35,7 @@ def requests_bulk_mutation(text: str, *, has_period: bool = False) -> bool:
     return verify_search_query(scope, scope, topic=True) is None
 
 
-DONE_RE = re.compile(r'^\s*(?:я\s+)?(?:уже\s+)?(?:с)?([а-яё]+(?:л|ла|ли))\s+(?P<what>.{2,}?)[.!]*\s*$', re.IGNORECASE)
+DONE_RE = re.compile(r'^\s*(?:я\s+)?(?:уже\s+)?(?!(?:удали|посоли|позволи|удивли|исправи?ли)\b)(?:с)?([а-яё]+(?:л|ла|ли))\s+(?P<what>.{2,}?)[.!]*\s*$', re.IGNORECASE)
 PAST_WORDS_RE = re.compile(r'\b(?:вчера|позавчера|прошл\w*)\b', re.IGNORECASE)
 COMMAND_RE = re.compile(
     r'\b(?:создай|создать|добавь|добавить|поставь|напомни|покажи|найди|удали|перенеси|'

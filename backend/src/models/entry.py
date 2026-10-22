@@ -29,6 +29,7 @@ class EntryRow(Base):
     duration_minutes: Mapped[int | None] = mapped_column(Integer, nullable=True)
     recurrence: Mapped[str | None] = mapped_column(String(16), nullable=True)
     recurrence_until: Mapped[datetime.date | None] = mapped_column(Date, nullable=True)
+    recurrence_interval: Mapped[int | None] = mapped_column(Integer, nullable=True)
     exdates: Mapped[list | None] = mapped_column(JSON, nullable=True)
     remind_minutes: Mapped[int | None] = mapped_column(Integer, nullable=True)
     priority: Mapped[str | None] = mapped_column(String(8), nullable=True)

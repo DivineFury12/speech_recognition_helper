@@ -237,6 +237,8 @@ class UndoTests(unittest.TestCase):
         self.assertEqual(chat.repository.items, [])
         back = chat('Отмени последнее')
         self.assertEqual(back.entries[0].title, 'Встреча с Иваном')
+        self.assertIn('Отменил', chat('Отмени последнее').assistant_text)
+        self.assertEqual(chat.repository.items, [])
         self.assertIn('нечего', chat('Отмени последнее').assistant_text)
 
 

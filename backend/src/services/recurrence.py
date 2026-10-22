@@ -11,7 +11,7 @@ PATTERNS = [
     (r'\bпо\s+будн(?:ям|ым\s+дням)\b|\bкажд\w*\s+будн\w*\s+день\b|\bв\s+будни\b', Recurrence.weekdays),
     (r'\bкажд\w*\s+(?:день|утро|вечер)\b|\bежедневн\w*\b', Recurrence.daily),
     (rf'\bкажд\w*\s+(?:недел\w*|{_WEEKDAY})|\bеженедельн\w*\b|\bпо\s+{_WEEKDAY}', Recurrence.weekly),
-    (r'\bкажд\w*\s+(?:месяц\w*|\d{1,2}(?:-?(?:го|е))?\s+числ\w*)|\bежемесячн\w*\b', Recurrence.monthly),
+    (r'\bкажд\w*\s+(?:месяц\w*|(?:\d{1,2}(?:-?(?:го|е))?|перв\w*|втор\w*|трет\w*|пят\w*|десят\w*|пятнадцат\w*|двадцат\w*|последн\w*)\s+числ\w*)|\bежемесячн\w*\b', Recurrence.monthly),
 ]
 LABEL = {
     Recurrence.daily: 'каждый день',

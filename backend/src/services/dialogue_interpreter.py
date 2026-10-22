@@ -158,6 +158,12 @@ class DialogueInterpreter:
         """Resolve a pending candidate choice before the service changes a record."""
         if not candidates:
             return CandidateResolution()
+        clock = re.search(r'\b([01]?\d|2[0-3])[:.]([0-5]\d)\b', text)
+        if clock:
+            said = f'{int(clock.group(1)):02d}:{clock.group(2)}'
+            by_time = [entry for entry in candidates if entry.time == said]
+            if len(by_time) == 1:
+                return CandidateResolution(selected=by_time[0])
         if ((reply is None and self._short_confirmation(text) is False)
                 or (reply is not None and reply.act == ReplyAct.reject
                     and len(candidates) == 1)):

@@ -26,6 +26,7 @@ from src.services.guards import (CHOICE_WORDS, DONE_RE, HELP_SUGGESTIONS, HELP_T
 from src.services.recurrence import find_recurrence, first_date, next_occurrence
 from src.services.batch import TOPIC_LIST_RX, apply_filter, bulk_filter, expand_creations
 from src.services.guards import COMPLETE_PHRASE_RE, SAME_AS_RE, SMALL_TALK_RE, UNDATED_RE
+from src.services.spoken import impossible_date, normalize_request, relative_minutes, spoken_time
 from src.user_context import current_user
 from src.services.temporal import (ambiguous_time_options, ambiguous_time_phrase,
                                    daypart_of_time, mentioned_entry_kind, parse_date, parse_daypart, parse_duration,
@@ -159,12 +160,142 @@ class AssistantService:
                     'pending_step': self._pending_step(pending),
                 })
             self._conversations.save_turn(turn, pending)
-            if undo is not None and hasattr(self._conversations, 'set_undo'):
-                self._conversations.set_undo(conversation_id, undo or None)
+            if undo and hasattr(self._conversations, 'set_undo'):
+                self._conversations.set_undo(conversation_id, {'stack': (self._undo_stack(conversation_id) + [undo])[-10:]})
             if (undo and undo.get('op') == 'create' and entries
                     and hasattr(self._conversations, 'add_created')):
                 self._conversations.add_created(conversation_id, entries[0].id)
         return turn
+
+    def _quick_answers(self, conversation_id: uuid.UUID, text: str, state) -> AssistantTurn | None:
+        """Questions people ask a scheduler that are not commands, and a few shortcuts."""
+        today = self._today()
+        value = text.casefold().replace('ё', 'е').strip()
+        nothing = AssistantCommand(action=AssistantIntent.unknown)
+        listing = AssistantCommand(action=AssistantIntent.list_entries)
+
+        wrong = impossible_date(text, today.year)
+        if wrong:
+            return self._turn(conversation_id, text, nothing, f'{wrong}. Назовите другую дату — я ничего не создал.',
+                              AssistantStatus.no_action, [])
+
+        if re.search(r'\b(?:погод\w*|курс\w*\s+(?:доллар|евро|валют|рубл)\w*|новост\w*|анекдот\w*|шутк\w*|'
+                     r'рецепт\w*|столиц\w*|кто\s+(?:такой|такая|ты)|что\s+такое)\b', value) \
+                and not re.search(r'\b(?:поставь|напомни|создай|добавь|запланируй)\b', value):
+            return self._turn(conversation_id, text, nothing,
+                              'С этим я не помогу: я веду задачи, встречи и напоминания. '
+                              'Например: «Что у меня завтра?» или «Напомни в 19:00 позвонить маме».',
+                              AssistantStatus.no_action, [])
+
+        kinds = {'встреч': EntryKind.meeting, 'задач': EntryKind.task, 'напомин': EntryKind.reminder}
+        kind = next((k for stem, k in kinds.items() if stem in value), None)
+
+        nxt = re.search(r'\bкогда\s+(?:у\s+меня\s+)?(?:следующ|ближайш)\w*\s+(встреч|задач|напомин)\w*', value)
+        if nxt:
+            upcoming = [e for e in self._entries.list_period(today, today + datetime.timedelta(days=365), kind=kind)
+                        if e.status != EntryStatus.completed
+                        and (e.date > today or not e.time or e.time >= self._now().strftime('%H:%M'))]
+            upcoming.sort(key=lambda e: (e.date, e.time or ''))
+            if not upcoming:
+                return self._turn(conversation_id, text, listing, 'Ближайших записей такого типа нет.',
+                                  AssistantStatus.completed, [])
+            first = upcoming[0]
+            return self._turn(conversation_id, text, listing,
+                              f'Ближайшая — {phrasing.describe(first, today)}.', AssistantStatus.completed, [first])
+
+        count = re.search(r'\bсколько\s+(?:у\s+меня\s+)?(встреч|задач|напоминани|запис|дел|событи)\w*', value)
+        if count:
+            period = parse_period(text, today) or (today, today)
+            found = [e for e in self._entries.list_period(*period, kind=kind) if e.status != EntryStatus.completed]
+            noun = {EntryKind.meeting: ('встреча', 'встречи', 'встреч'), EntryKind.task: ('задача', 'задачи', 'задач'),
+                    EntryKind.reminder: ('напоминание', 'напоминания', 'напоминаний')}.get(
+                kind, ('запись', 'записи', 'записей'))
+            label = (f'на {phrasing.format_date(period[0], today)}' if period[0] == period[1]
+                     else f'с {phrasing.format_day(period[0], today)} по {phrasing.format_day(period[1], today)}')
+            if not found:
+                return self._turn(conversation_id, text, listing, f'{label.capitalize()} {noun[2]} нет.',
+                                  AssistantStatus.completed, [])
+            lines = [phrasing.entry_line(e, today, show_date=period[0] != period[1]) for e in found]
+            return self._turn(conversation_id, text, listing,
+                              f'{label.capitalize()} {len(found)} {phrasing.plural(len(found), *noun)}:\n'
+                              + '\n'.join(lines), AssistantStatus.completed, found)
+
+        free = re.search(r'\b(?:я\s+)?(?:свобод\w*|занят\w*)\b', value)
+        if free and '?' in text or free and re.match(r'^\s*(?:я\s+)?(?:свобод|занят)', value):
+            day = parse_date(text, today) or today
+            moment = parse_time(text)
+            busy = [e for e in self._entries.list_period(day, day) if e.status != EntryStatus.completed and e.time]
+            if moment:
+                start = datetime.datetime.combine(day, datetime.time.fromisoformat(moment))
+                clashes = []
+                for e in busy:
+                    e_start = datetime.datetime.combine(day, datetime.time.fromisoformat(e.time))
+                    e_end = e_start + datetime.timedelta(minutes=e.duration_minutes or (60 if e.kind == EntryKind.meeting else 15))
+                    if e_start <= start < e_end:
+                        clashes.append(e)
+                if clashes:
+                    return self._turn(conversation_id, text, listing,
+                                      f'Нет, в это время у вас {phrasing.describe(clashes[0], today)}.',
+                                      AssistantStatus.completed, clashes)
+                return self._turn(conversation_id, text, listing,
+                                  f'Да, {phrasing.format_date(day, today)} в {moment} свободно.',
+                                  AssistantStatus.completed, [])
+            if not busy:
+                return self._turn(conversation_id, text, listing,
+                                  f'{phrasing.format_date(day, today).capitalize()} весь день свободен.',
+                                  AssistantStatus.completed, [])
+            lines = [phrasing.entry_line(e, today, show_date=False) for e in busy]
+            return self._turn(conversation_id, text, listing,
+                              f'{phrasing.format_date(day, today).capitalize()} заняты:\n' + '\n'.join(lines),
+                              AssistantStatus.completed, busy)
+
+        mark_all = re.match(r'^\s*(?:отметь|пометь)\s+(?:все|всё)\s+(?P<rest>.+?)\s+(?:как\s+)?(?:выполнен\w*|сделан\w*)',
+                            value)
+        if mark_all:
+            period = parse_period(mark_all.group('rest'), today)
+            pool = (self._entries.list_period(*period) if period else self._entries.all_entries())
+            todo = [e for e in {e.id: e for e in pool}.values()
+                    if e.status != EntryStatus.completed and e.kind != EntryKind.meeting
+                    and (kind is None or e.kind == kind)]
+            for entry in todo:
+                self._entries.update(entry.id, EntryUpdate(status=EntryStatus.completed))
+            command = AssistantCommand(action=AssistantIntent.complete_entry)
+            if not todo:
+                return self._turn(conversation_id, text, command, 'Невыполненных записей не нашёл.',
+                                  AssistantStatus.no_action, [])
+            noun = phrasing.plural(len(todo), 'запись', 'записи', 'записей')
+            return self._turn(conversation_id, text, command,
+                              f'Отметил выполненными {len(todo)} {noun}: '
+                              + ', '.join(f'«{e.title}»' for e in todo[:6]) + ('…' if len(todo) > 6 else '') + '.',
+                              AssistantStatus.completed, todo[:8])
+
+        rename = re.match(r'^\s*(?:переименуй|назови)\s+(?:ее|его|это|эту|этот)\s+(?:в|как)\s+(?P<title>.+?)[.!]*\s*$', value)
+        if rename and state is not None and state.last_entry_id is not None:
+            target = self._entries.get(state.last_entry_id)
+            if target is not None:
+                title = text.strip().rstrip('.!')[-len(rename.group('title')):]
+                title = title[:1].upper() + title[1:]
+                updated = self._entries.update(target.id, EntryUpdate(title=title))
+                return self._turn(conversation_id, text, AssistantCommand(action=AssistantIntent.update_entry),
+                                  f'Переименовал: «{target.title}» → «{updated.title}».',
+                                  AssistantStatus.completed, [updated], undo=self._undo('update', target))
+
+        follow = re.match(r'^\s*а\s+(?:теперь\s+)?(?:для\s+|с\s+|к\s+)?(?P<who>[А-ЯЁа-яё]+)\b(?P<rest>.*?)[?.!]*\s*$', text)
+        if (follow and state is not None and not re.search(
+                r'\b(?:удали|перенеси|сдвинь|отметь|покажи|найди|поставь|создай|напомни|что|когда|сколько)\b', value)):
+            source = self._reference_entry(conversation_id, text, state)
+            if source is not None and source.title:
+                words = source.title.split()
+                who = follow.group('who')
+                if len(words) >= 2 and words[-1][:1].isupper() and who[:1].isalpha():
+                    title = ' '.join(words[:-1] + [who[:1].upper() + who[1:]])
+                    copy = AssistantCommand(
+                        action=AssistantIntent.create_entry, kind=source.kind, title=title,
+                        date=parse_date(text, today) or source.date, time=parse_time(text) or source.time,
+                        duration_minutes=source.duration_minutes if source.kind == EntryKind.meeting else None,
+                    )
+                    return self._create(conversation_id, text, copy, source.timezone)
+        return None
 
     def _reference_entry(self, conversation_id: uuid.UUID, text: str, state) -> Entry | None:
         """Which earlier record «такую же» means: «первое», «второе», … or the last one by default."""
@@ -439,7 +570,9 @@ class AssistantService:
             raise InvalidTimezoneError('Укажите корректный часовой пояс IANA') from exc
         token = _now.set(now)
         try:
-            return self._handle_many(text, timezone, conversation_id, now.date())
+            cleaned = normalize_request(text)
+            turn = self._handle_many(cleaned, timezone, conversation_id, now.date())
+            return turn if cleaned == text else turn.model_copy(update={'user_text': text})
         finally:
             _now.reset(token)
 
@@ -692,7 +825,9 @@ class AssistantService:
             return self._turn(conversation_id, text, command,
                               'Сейчас нечего отменять. Чтобы убрать последнее действие, скажите «Отмени последнее».',
                               AssistantStatus.no_action, []), state
-        if requests_bulk_mutation(text, has_period=True):
+        single = re.match(r'^\s*(?:удали|убери|отмени)\s+(?:эту\s+|мою\s+)?(?:встречу|задачу|напоминание|запись)\b(?!.*\b(?:все|всё|всех)\b)',
+                          text, re.IGNORECASE)
+        if requests_bulk_mutation(text, has_period=True) and not single:
             if previous is not None:
                 _batch_interrupted.set(True)
             classify = getattr(self._extractor, 'classify_bulk_delete', None)
@@ -738,6 +873,26 @@ class AssistantService:
             if turn is not None:
                 return turn, state
             return None, dataclasses.replace(state, pending_command=None)
+        clock = re.search(r'\b([01]?\d|2[0-3]):([0-5]\d)\b', text)
+        if (previous is not None and clock and not previous.candidate_ids and self._entries is not None
+                and previous.action in (AssistantIntent.delete_entry, AssistantIntent.update_entry)
+                and previous.selected_entry_id is None):
+            said = f'{int(clock.group(1)):02d}:{clock.group(2)}'
+            today = self._today()
+            day = parse_date(text, today)
+            pool = self._entries.list_period(day or today, day or today + datetime.timedelta(days=60), kind=previous.kind)
+            hits = [e for e in pool if e.time == said and e.status != EntryStatus.completed]
+            if len(hits) == 1:
+                pending = previous.model_copy(update={'candidate_ids': [hits[0].id]})
+                verb = 'Удалить' if previous.action == AssistantIntent.delete_entry else 'Изменить'
+                return self._turn(conversation_id, text, previous,
+                                  f'{verb} {phrasing.describe(hits[0], today, accusative=True)}? Ответьте «да» или «нет».',
+                                  AssistantStatus.needs_clarification, hits, pending=pending), state
+        quick = self._quick_answers(conversation_id, text, state) if self._entries is not None else None
+        if quick is not None:
+            if previous is not None:
+                _batch_interrupted.set(True)
+            return quick, state
         small_talk = SMALL_TALK_RE.fullmatch(text.strip(' !.?,)').casefold().replace('ё', 'е'))
         if small_talk:
             command = AssistantCommand(action=AssistantIntent.unknown)
@@ -1113,9 +1268,18 @@ class AssistantService:
                           f'Подтвердите их или укажите {requested_fields} ещё раз.',
                           AssistantStatus.needs_clarification, [entry] if entry else [], pending)
 
-    def _undo_last(self, conversation_id: uuid.UUID, text: str) -> AssistantTurn:
+    def _undo_stack(self, conversation_id: uuid.UUID) -> list[dict]:
         record = (self._conversations.get_undo(conversation_id)
                   if hasattr(self._conversations, 'get_undo') else None)
+        if not record:
+            return []
+        return list(record['stack']) if 'stack' in record else [record]
+
+    def _undo_last(self, conversation_id: uuid.UUID, text: str) -> AssistantTurn:
+        stack = self._undo_stack(conversation_id)
+        record = stack.pop() if stack else None
+        if record is not None:
+            self._conversations.set_undo(conversation_id, {'stack': stack} if stack else None)
         nothing = AssistantCommand(action=AssistantIntent.unknown)
         if not record or self._entries is None:
             return self._turn(conversation_id, text, nothing,
@@ -1442,6 +1606,42 @@ class AssistantService:
                 until = find_until(text, today)
                 if until is not None:
                     grounded['recurrence_until'] = until
+                if command.date is None:
+                    monthly_day = re.search(r'\bкажд\w*\s+(\d{1,2}|перв\w*)\b', text.casefold())
+                    if rule.value == 'monthly' and monthly_day:
+                        day = 1 if not monthly_day.group(1).isdigit() else int(monthly_day.group(1))
+                        start = today.replace(day=min(day, 28))
+                        if start < today:
+                            start = (start.replace(day=1) + datetime.timedelta(days=32)).replace(day=start.day)
+                        grounded['date'] = start
+                    else:
+                        grounded['date'] = first_date(rule, today)
+                if command.time is None and parse_time(text):
+                    grounded['time'] = parse_time(text)
+            delta = relative_minutes(text)
+            if delta:
+                # «через полтора часа»: counted from now, not guessed by the model.
+                moment = self._now() + datetime.timedelta(minutes=delta)
+                grounded.update({'date': moment.date(), 'time': moment.strftime('%H:%M'),
+                                 'kind': command.kind or EntryKind.reminder,
+                                 'date_unverified': None, 'time_unverified': None})
+            if delta and command.title:
+                trimmed = re.sub(r'(?i)^\s*(?:через\s+)?(?:\d{1,3}|полтора|полчаса|час\w*)?\s*(?:минут\w*|час\w*)?\s+', '',
+                                 command.title) if re.match(r'(?i)^\s*(?:через\s|\d|полтора|полчаса|минут|час)', command.title) else command.title
+                if trimmed and trimmed != command.title:
+                    grounded['title'] = trimmed[:1].upper() + trimmed[1:]
+            said = spoken_time(text)
+            if said and command.time != said and not delta:
+                grounded.update({'time': said, 'time_unverified': None})
+            if said and command.title:
+                cleaned_title = re.sub(
+                    r'(?i)\b(?:в\s+)?(?:пол\s*\w+|половин\w*\s+\w+|четверть\s+\w+|без\s+(?:четверти|\w+)(?:\s+минут\w*)?'
+                    r'\s+\w+)(?:\s+(?:утра|дня|вечера|ночи))?\b', ' ', command.title)
+                cleaned_title = ' '.join(cleaned_title.split())
+                if cleaned_title and cleaned_title != command.title:
+                    if command.kind == EntryKind.meeting and re.match(r'(?i)с\s', cleaned_title):
+                        cleaned_title = f'Встреча {cleaned_title}'
+                    grounded['title'] = cleaned_title
             lead = find_lead(text)
             if lead is not None:
                 grounded['remind_minutes'] = lead

@@ -375,7 +375,7 @@ class AssistantServiceTests(unittest.TestCase):
         self.assertEqual(command.date, datetime.date(2026, 10, 25))
         self.assertEqual(command.time, '19:30')
         self.assertTrue(command.date_unverified)
-        self.assertTrue(command.time_unverified)
+        self.assertFalse(command.time_unverified)
         self.assertEqual(len(client.calls), 2)
 
     def test_unfamiliar_clarification_reaches_structured_extractor(self):
@@ -429,7 +429,7 @@ class AssistantServiceTests(unittest.TestCase):
             'Europe/Moscow', today,
         )
         self.assertTrue(command.date_unverified)
-        self.assertTrue(command.time_unverified)
+        self.assertFalse(command.time_unverified)
         entries = FakeEntries()
         conversations = FakeConversations()
         service = AssistantService(FakeExtractor(command), entries, conversations)
@@ -441,7 +441,6 @@ class AssistantServiceTests(unittest.TestCase):
             )
             self.assertEqual(entries.created, [])
             self.assertIn('25 октября', first.assistant_text)
-            self.assertIn('19:30', first.assistant_text)
             second = service.handle_message('да', 'Europe/Moscow', first.conversation_id)
         finally:
             assistant_module._now.reset(token)

@@ -5,6 +5,7 @@ import datetime
 import re
 
 from src.schemas.assistant import EntryKind
+from src.services.spoken import spoken_time
 from src.schemas.assistant_command import AssistantCommand
 
 
@@ -428,6 +429,9 @@ SPACED_DATE_RE = re.compile(r'(?<![\d:])\d{1,2}\s+\d{1,2}\s+\d{4}(?![\d:])')
 def parse_time(phrase: str) -> str | None:
     # «12 03 2027» is a date: its numbers must not be read as «в 12».
     value = SPACED_DATE_RE.sub(' ', phrase.casefold().replace('ё', 'е'))
+    spoken = spoken_time(value)
+    if spoken is not None:
+        return spoken
     if 'полноч' in value:
         return '00:00'
     if 'полден' in value or 'полдн' in value:
@@ -509,6 +513,8 @@ def daypart_of_time(value: str) -> str:
 def ambiguous_time_phrase(text: str) -> str | None:
     """Find a spoken 1–11 o'clock without a morning/evening qualifier."""
     value = SPACED_DATE_RE.sub(' ', text.casefold().replace('ё', 'е'))
+    if spoken_time(value) is not None:
+        return None
     if re.search(r'\b(?:[01]?\d|2[0-3]):[0-5]\d\b', value):
         # An exact «16:00» settles the time; «на 3 символа» elsewhere is not an hour.
         return None

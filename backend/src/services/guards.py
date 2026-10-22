@@ -170,7 +170,8 @@ STOP_SERIES_RE = re.compile(
     r'прекрати\s+повтор\w*|отмени\s+повтор\w*)\s+(?P<what>.+?)\s*[.!]*$', re.IGNORECASE,
 )
 UNTIL_RE = re.compile(
-    r'\bдо\s+(?P<when>конца\s+(?:недели|месяца|года)|\d{1,2}\s+[а-я]+|\d{1,2}[./]\d{1,2}(?:[./]\d{2,4})?)',
+    r'\bдо\s+(?P<when>конца\s+(?:недели|месяца|года|[а-я]+)|\d{1,2}\s+[а-я]+|\d{1,2}[./]\d{1,2}(?:[./]\d{2,4})?'
+    r'|(?:января|февраля|марта|апреля|мая|июня|июля|августа|сентября|октября|ноября|декабря))',
     re.IGNORECASE,
 )
 
@@ -211,6 +212,15 @@ def find_until(text: str, today) -> object | None:
         return today.replace(day=calendar.monthrange(today.year, today.month)[1])
     if when.startswith('конца года'):
         return today.replace(month=12, day=31)
+    months = ['января', 'февраля', 'марта', 'апреля', 'мая', 'июня', 'июля', 'августа', 'сентября',
+              'октября', 'ноября', 'декабря']
+    name = when.split()[-1]
+    if name in months and not when[:1].isdigit():
+        month = months.index(name) + 1
+        year = today.year + (month < today.month)
+        if when.startswith('конца'):
+            return datetime.date(year, month, calendar.monthrange(year, month)[1])
+        return datetime.date(year, month, 1) - datetime.timedelta(days=1)
     return parse_date(when, today)
 
 

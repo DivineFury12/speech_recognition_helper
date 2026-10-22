@@ -5,6 +5,7 @@
 """
 
 import calendar
+import difflib
 import re
 
 ORDINAL_GEN = {
@@ -101,6 +102,25 @@ TYPOS = [
 ]
 NOT_THIS_RE = re.compile(r'^\s*(?:нет\s*,?\s*)?не\s+(?:эту|этот|это|эта|ту|тот|та)\s*,?\s*а\s+', re.IGNORECASE)
 CREATE_THIS_RE = re.compile(r'(?i)\b(поставь|создай|запланируй|добавь|напомни\s+про)\s+(?:эт[уоа]|этот)\s+')
+SPACED_TIME_RE = re.compile(r'\b(в|на|к|до|с)\s+([01]?\d|2[0-3])\s+(00|05|10|15|20|25|30|35|40|45|50|55)\b(?!\s*\d)',
+                            re.IGNORECASE)
+GREETINGS = ('привет', 'приветик', 'здравствуй', 'здравствуйте', 'здорово', 'здарова', 'здрасьте', 'хай')
+NOT_GREETING_RE = re.compile(r'^(?:привез|привоз|привед|привяз|привык|привлек|привил|привет\w*ств)', re.IGNORECASE)
+
+
+def _drop_greeting(value: str) -> str:
+    """«прмвеи завтра стирка в 15:00»: a mistyped hello in front of a command is not part of it."""
+    words = value.split(maxsplit=1)
+    if len(words) < 2:
+        return value
+    head = words[0].strip(',.!').casefold()
+    if NOT_GREETING_RE.match(head) or len(head) < 3:
+        return value
+    if max(difflib.SequenceMatcher(None, head, g).ratio() for g in GREETINGS) >= 0.7:
+        return words[1].lstrip(' ,.!')
+    return value
+
+
 INTERJECTIONS_RE = re.compile(r'\b(?:блин|блять|бля|черт|чёрт|короче|типа|слушай|кстати)\b,?\s*', re.IGNORECASE)
 
 
@@ -112,6 +132,8 @@ def normalize_request(text: str) -> str:
     for pattern, word in TYPOS:
         value = re.sub(pattern, word, value, flags=re.IGNORECASE)
     value = INTERJECTIONS_RE.sub('', value)
+    value = SPACED_TIME_RE.sub(lambda m: f"{m.group(1)} {m.group(2)}:{m.group(3)}", value)
+    value = _drop_greeting(value)
     return ' '.join(value.split()) or text
 
 

@@ -920,7 +920,7 @@ class AssistantServiceTests(unittest.TestCase):
         self.assertEqual([response.entries[0].kind for response in turn.responses],
                          [EntryKind.meeting, EntryKind.task])
         self.assertEqual([call[0] for call in commands.calls], [
-            'Привет поставь мне созвон с коллегой на субботу в 9 утра',
+            'поставь мне созвон с коллегой на субботу в 9 утра',
             'в воскресенье в 8 вечера надо покормить черепаху',
         ])
 

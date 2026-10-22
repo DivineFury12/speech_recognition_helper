@@ -161,7 +161,23 @@ class AssistantService:
             self._conversations.save_turn(turn, pending)
             if undo is not None and hasattr(self._conversations, 'set_undo'):
                 self._conversations.set_undo(conversation_id, undo or None)
+            if (undo and undo.get('op') == 'create' and entries
+                    and hasattr(self._conversations, 'add_created')):
+                self._conversations.add_created(conversation_id, entries[0].id)
         return turn
+
+    def _reference_entry(self, conversation_id: uuid.UUID, text: str, state) -> Entry | None:
+        """Which earlier record «такую же» means: «первое», «второе», … or the last one by default."""
+        created = (self._conversations.created_entries(conversation_id)
+                   if hasattr(self._conversations, 'created_entries') else [])
+        existing = [entry for entry in (self._entries.get(entry_id) for entry_id in created) if entry is not None]
+        ordinal = re.search(r'\b(перв|втор|трет|четв[её]рт|пят)\w*', text.casefold())
+        if existing:
+            if ordinal:
+                index = ('перв', 'втор', 'трет', 'четв', 'пят').index(ordinal.group(1)[:4])
+                return existing[index] if index < len(existing) else None
+            return existing[-1]
+        return self._entries.get(state.last_entry_id) if state is not None and state.last_entry_id else None
 
     @staticmethod
     def _pending_step(command: AssistantCommand) -> PendingStep:
@@ -645,9 +661,8 @@ class AssistantService:
                                            target_query=complete_phrase.group('what'))
                 return self._mutate(conversation_id, text, command, entry), state
         if (previous is not None and previous.action == AssistantIntent.create_entry and not previous.confirm
-                and SAME_AS_RE.search(text) and self._entries is not None
-                and state is not None and state.last_entry_id is not None):
-            source = self._entries.get(state.last_entry_id)
+                and SAME_AS_RE.search(text) and self._entries is not None and state is not None):
+            source = self._reference_entry(conversation_id, text, state)
             if source is not None:
                 filled = previous.model_copy(update={
                     'kind': previous.kind or source.kind,
@@ -659,11 +674,10 @@ class AssistantService:
                 })
                 return self._create(conversation_id, text, filled, 'Europe/Moscow'
                                     if not source.timezone else source.timezone), state
-        if (previous is None and SAME_AS_RE.search(text) and self._entries is not None
-                and state is not None and state.last_entry_id is not None
+        if (previous is None and SAME_AS_RE.search(text) and self._entries is not None and state is not None
                 and not re.search(r'\b(?:удали|перенеси|сдвинь|отметь|покажи|найди)\b', text, re.IGNORECASE)):
-            # «Сделай такую же, но на 17:00»: copy the record the dialogue is about, change what was said.
-            source = self._entries.get(state.last_entry_id)
+            # «Сделай такую же, как в первом сообщении, но на 17:00»: copy that record, change what was said.
+            source = self._reference_entry(conversation_id, text, state)
             if source is not None:
                 today = self._today()
                 copy = AssistantCommand(

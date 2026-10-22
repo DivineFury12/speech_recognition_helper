@@ -124,3 +124,22 @@ class SmallTalkAndSpacedDates(unittest.TestCase):
         self.assertEqual(parse_date('на 24 12 2027', WEDNESDAY), datetime.date(2027, 12, 24))
         self.assertIsNone(parse_date('встреча 24 12', WEDNESDAY))
         self.assertIsNone(parse_date('встреча на 10-15 минут', WEDNESDAY))
+
+
+class FirstOrLastReference(unittest.TestCase):
+    def test_first_and_last_message_are_told_apart(self):
+        tomorrow = (TODAY + datetime.timedelta(days=1)).isoformat()
+        chat = Chat([
+            command(action='create_entry', kind='meeting', title='встреча с Максимом', date=tomorrow, time='10:00',
+                    date_phrase='завтра', time_phrase='в 10:00'),
+            command(action='create_entry', kind='meeting', title='встреча с Петром', date=tomorrow, time='14:00',
+                    date_phrase='завтра', time_phrase='в 14:00'),
+        ])
+        chat('Поставь встречу с Максимом завтра в 10:00')
+        chat('Поставь встречу с Петром завтра в 14:00')
+        first = chat('Сделай такую же как в первом сообщении, но на 18:00')
+        self.assertEqual((first.entries[0].title, first.entries[0].time), ('Встреча с Максимом', '18:00'))
+        last = chat('А теперь такую же как в последнем, но на 20:00')
+        self.assertEqual((last.entries[0].title, last.entries[0].time), ('Встреча с Максимом', '20:00'))
+        second = chat('Ещё такую же как во втором, но на 21:00')
+        self.assertEqual((second.entries[0].title, second.entries[0].time), ('Встреча с Петром', '21:00'))

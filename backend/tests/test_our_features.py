@@ -69,6 +69,7 @@ class Conversations:
     def __init__(self):
         self.states = {}
         self.undo = {}
+        self.created = {}
 
     def get(self, conversation_id):
         return self.states.get(conversation_id)
@@ -95,6 +96,12 @@ class Conversations:
 
     def set_undo(self, conversation_id, record):
         self.undo[conversation_id] = record
+
+    def created_entries(self, conversation_id):
+        return list(self.created.get(conversation_id, []))
+
+    def add_created(self, conversation_id, entry_id):
+        self.created.setdefault(conversation_id, []).append(entry_id)
 
 
 def command(**fields):

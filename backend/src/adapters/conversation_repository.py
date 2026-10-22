@@ -40,6 +40,23 @@ class SqlAlchemyConversationRepository:
             if row.user_id == current_user():
                 row.undo_record = record
 
+    def created_entries(self, conversation_id: uuid.UUID) -> list[uuid.UUID]:
+        """Records this conversation created, oldest first."""
+        with database_session(self._sessions) as session:
+            row = session.get(ConversationRow, conversation_id)
+            if row is None or row.user_id != current_user():
+                return []
+            return [uuid.UUID(value) for value in row.created_entry_ids or []]
+
+    def add_created(self, conversation_id: uuid.UUID, entry_id: uuid.UUID) -> None:
+        with database_session(self._sessions, write=True) as session:
+            row = session.get(ConversationRow, conversation_id, with_for_update=True)
+            if row is None or row.user_id != current_user():
+                return
+            ids = list(row.created_entry_ids or [])
+            if str(entry_id) not in ids:
+                row.created_entry_ids = (ids + [str(entry_id)])[-50:]
+
     def get(self, conversation_id: uuid.UUID) -> ConversationState | None:
         with database_session(self._sessions) as session:
             row = session.get(ConversationRow, conversation_id)

@@ -16,6 +16,7 @@ class ConversationRow(Base):
     user_id: Mapped[str] = mapped_column(String(64), nullable=False, default='local', server_default='local')
     pending_command: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     undo_record: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    created_entry_ids: Mapped[list | None] = mapped_column(JSON, nullable=True)
     last_entry_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
     created_at: Mapped[datetime.datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now(),

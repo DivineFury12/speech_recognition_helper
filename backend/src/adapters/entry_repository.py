@@ -49,6 +49,7 @@ class SqlAlchemyEntryRepository:
         with database_session(self._sessions, write=True) as session:
             row = EntryRow(
                 id=entry.id, user_id=current_user(), kind=entry.kind.value, title=entry.title,
+                topics=entry.topics,
                 date=entry.date, time=entry.time, timezone=entry.timezone,
                 duration_minutes=entry.duration_minutes,
                 recurrence=entry.recurrence.value if entry.recurrence else None,
@@ -145,6 +146,7 @@ class SqlAlchemyEntryRepository:
         recurrence_until: datetime.date | None = None,
         priority: str | None = None,
         recurrence_interval: int | None = None,
+        topics: list[str] | None = None,
     ) -> Entry:
         with database_session(self._sessions, write=True) as session:
             return self._insert(
@@ -153,6 +155,7 @@ class SqlAlchemyEntryRepository:
                 duration_minutes=duration_minutes, recurrence=recurrence,
                 remind_minutes=remind_minutes, recurrence_until=recurrence_until, priority=priority,
                 recurrence_interval=recurrence_interval,
+                topics=topics,
             )
 
     @staticmethod
@@ -163,6 +166,7 @@ class SqlAlchemyEntryRepository:
         duration_minutes: int | None = None, recurrence: Recurrence | None = None,
         remind_minutes: int | None = None, recurrence_until: datetime.date | None = None,
         priority: str | None = None, recurrence_interval: int | None = None,
+        topics: list[str] | None = None,
     ) -> Entry:
         row = EntryRow(
             id=uuid.uuid4(), user_id=current_user(), kind=kind.value, title=title, date=date,
@@ -171,6 +175,7 @@ class SqlAlchemyEntryRepository:
             remind_minutes=remind_minutes, recurrence_until=recurrence_until,
             priority=getattr(priority, 'value', priority), recurrence_interval=recurrence_interval,
             status=EntryStatus.pending.value,
+            topics=topics,
         )
         session.add(row)
         session.flush()
@@ -190,6 +195,7 @@ class SqlAlchemyEntryRepository:
         recurrence: Recurrence | None = None, remind_minutes: int | None = None,
         recurrence_until: datetime.date | None = None, priority: str | None = None,
         recurrence_interval: int | None = None,
+        topics: list[str] | None = None,
     ) -> tuple[Entry, bool]:
         normalized_title = ' '.join(title.casefold().split())
         user_id = current_user()
@@ -221,6 +227,7 @@ class SqlAlchemyEntryRepository:
                 duration_minutes=duration_minutes, recurrence=recurrence,
                 remind_minutes=remind_minutes, recurrence_until=recurrence_until, priority=priority,
                 recurrence_interval=recurrence_interval,
+                topics=topics,
             ), True
 
     def list_period(

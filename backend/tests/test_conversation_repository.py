@@ -78,6 +78,13 @@ class ConversationRepositoryIntegrationTests(unittest.TestCase):
             self.assertEqual(len(state.messages), 16)
             self.assertEqual(state.messages[0].text, 'Вопрос 0')
             self.assertEqual(state.messages[-1].text, 'Ответ 7')
+            self.repository.save_summary(conversation_id, 'Обсуждали планы.', 10)
+            compacted = self.repository.get(conversation_id)
+            self.assertEqual(compacted.summary, 'Обсуждали планы.')
+            self.assertEqual(compacted.summarized_message_count, 10)
+            self.assertEqual(compacted.model_history()[0],
+                             {'role': 'summary', 'text': 'Обсуждали планы.'})
+            self.assertEqual(len(compacted.model_history()), 7)
         finally:
             with self.sessions.begin() as session:
                 session.execute(delete(ConversationRow).where(ConversationRow.id == conversation_id))

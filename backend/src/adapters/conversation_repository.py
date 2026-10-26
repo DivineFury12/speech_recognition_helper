@@ -73,7 +73,18 @@ class SqlAlchemyConversationRepository:
                 if row.pending_command else None,
                 messages=[_message(item) for item in messages],
                 last_entry_id=row.last_entry_id,
+                summary=row.summary,
+                summarized_message_count=row.summarized_message_count,
             )
+
+    def save_summary(self, conversation_id: uuid.UUID, summary: str, message_count: int) -> None:
+        with database_session(self._sessions, write=True) as session:
+            row = session.get(ConversationRow, conversation_id, with_for_update=True)
+            if row is None or row.user_id != current_user():
+                return
+            if message_count > row.summarized_message_count:
+                row.summary = summary
+                row.summarized_message_count = message_count
 
     def save_turn(
         self, turn: AssistantTurn, pending_command: AssistantCommand | None,

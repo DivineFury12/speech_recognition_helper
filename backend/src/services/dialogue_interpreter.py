@@ -222,8 +222,7 @@ class DialogueInterpreter:
             reply = classify(
                 text, step=step, action=command.action,
                 question=question, candidates=candidates, pending=command,
-                history=[{'role': item.role, 'text': item.text}
-                         for item in state.messages],
+                history=state.model_history(),
             )
             if reply.act == ReplyAct.select:
                 if step == PendingStep.time_choice:
@@ -300,8 +299,7 @@ class DialogueInterpreter:
         state: ConversationState | None,
     ) -> DialoguePlan:
         previous = state.pending_command if state else None
-        history = ([{'role': item.role, 'text': item.text} for item in state.messages]
-                   if state else [])
+        history = state.model_history() if state else []
         step = self.pending_step(previous) if previous is not None else None
         reply = self._classify(text, previous, state, today) if previous is not None else None
         transition = transition_for_reply(step, reply.act) if reply is not None else None

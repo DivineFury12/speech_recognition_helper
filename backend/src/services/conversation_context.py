@@ -38,6 +38,11 @@ def select_conversation_context(
     """
     if not history:
         return []
+    summary = next((message['text'][:1800] for message in history
+                    if message['role'] == 'summary' and message['text']), None)
+    history = [message for message in history if message['role'] != 'summary']
+    if not history:
+        return [{'role': 'summary', 'text': summary}] if summary else []
     pairs = _pairs(history)
     recent_count = min(len(pairs), RECENT_MESSAGES // 2)
     recent = pairs[-recent_count:]
@@ -59,7 +64,7 @@ def select_conversation_context(
     # turns by relevance. Never leave an assistant answer without its question.
     preferred = list(reversed(recent)) + [older[number] for _, number in ranked[:OLDER_PAIRS]]
     selected: list[tuple[int, list[dict[str, str]]]] = []
-    remaining = MAX_CONTEXT_CHARS
+    remaining = MAX_CONTEXT_CHARS - (len(summary) if summary else 0)
     count = 0
     for pair in preferred:
         excerpts = [{'role': history[index]['role'],
@@ -70,4 +75,5 @@ def select_conversation_context(
             selected.append((pair[0], excerpts))
             remaining -= size
             count += len(excerpts)
-    return [message for _, pair in sorted(selected) for message in pair]
+    result = [message for _, pair in sorted(selected) for message in pair]
+    return ([{'role': 'summary', 'text': summary}] if summary else []) + result

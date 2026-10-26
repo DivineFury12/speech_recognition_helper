@@ -23,6 +23,7 @@ class EntryRow(Base):
     user_id: Mapped[str] = mapped_column(String(64), nullable=False, default='local', server_default='local')
     kind: Mapped[str] = mapped_column(String(16), nullable=False)
     title: Mapped[str] = mapped_column(Text, nullable=False)
+    topics: Mapped[list | None] = mapped_column(JSON, nullable=True)
     date: Mapped[datetime.date | None] = mapped_column(Date, nullable=True)
     time: Mapped[str | None] = mapped_column(String(5), nullable=True)
     timezone: Mapped[str] = mapped_column(String(64), nullable=False)

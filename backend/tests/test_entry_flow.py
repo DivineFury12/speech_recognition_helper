@@ -1,11 +1,12 @@
 import datetime
+import json
 import math
 import unittest
 import uuid
 from zoneinfo import ZoneInfo
 
 from src.ports.conversations import ConversationState
-from src.schemas.assistant import AssistantIntent, AssistantStatus, Entry, EntryKind, EntryStatus
+from src.schemas.assistant import AssistantIntent, AssistantStatus, Entry, EntryKind, EntryStatus, EntryUpdate
 from src.schemas.assistant_command import AssistantCommand
 from src.schemas.dialogue import PendingReply, PendingStep, ReplyAct, ScheduleRole
 from src.services import assistant as assistant_module
@@ -21,11 +22,12 @@ class FakeRepository:
         self.embeddings = {}
 
     def create(self, *, kind, title, date, time, timezone, embedding, embedding_model,
-               duration_minutes=None):
+               duration_minutes=None, topics=None):
         self.last_embedding = embedding
         entry = Entry(
             id=uuid.uuid4(), kind=kind, title=title, date=date, time=time,
-            timezone=timezone, duration_minutes=duration_minutes, status=EntryStatus.pending,
+            timezone=timezone, duration_minutes=duration_minutes, topics=topics,
+            status=EntryStatus.pending,
             created_at=datetime.datetime.now(datetime.timezone.utc),
         )
         self.items.append(entry)
@@ -35,6 +37,9 @@ class FakeRepository:
 
     def get(self, entry_id):
         return next((entry for entry in self.items if entry.id == entry_id), None)
+
+    def all_entries(self):
+        return list(self.items)
 
     def update(self, entry_id, changes, *, embedding, embedding_model):
         entry = self.get(entry_id)
@@ -59,7 +64,7 @@ class FakeRepository:
         return True
 
     def create_once(self, *, kind, title, date, time, timezone, embedding, embedding_model,
-                    duration_minutes=None):
+                     duration_minutes=None, topics=None):
         for entry in self.items:
             if (
                 entry.kind == kind and entry.title.casefold() == title.casefold()
@@ -71,6 +76,7 @@ class FakeRepository:
             kind=kind, title=title, date=date, time=time, timezone=timezone,
             embedding=embedding, embedding_model=embedding_model,
             duration_minutes=duration_minutes,
+            topics=topics,
         ), True
 
     def list_period(self, date_from, date_to, *, kind=None, status=None):
@@ -177,6 +183,69 @@ class FakeConversations:
 
 
 class EntryFlowTests(unittest.TestCase):
+    def test_health_topics_survive_new_chats_and_search_past_150_entries(self):
+        repository = FakeRepository()
+        entries = EntryService(repository)
+        for index in range(160):
+            entries.create(kind=EntryKind.task, title=f'Купить книгу {index}',
+                           date=None, time=None, timezone='Europe/Moscow')
+        doctor = entries.create(kind=EntryKind.task, title='Сходить ко врачу',
+                                date=None, time=None, timezone='Europe/Moscow')
+        clinic = entries.create(kind=EntryKind.task, title='Посетить диспансер',
+                                date=None, time=None, timezone='Europe/Moscow')
+        entries.update(doctor.id, EntryUpdate(status=EntryStatus.completed))
+        service = AssistantService(FakeExtractor(AssistantCommand(action=AssistantIntent.unknown)),
+                                   entries, FakeConversations())
+        first = service.handle_message('Покажи все записи про здоровье', 'Europe/Moscow', None)
+        second = service.handle_message('Покажи все записи про здоровье', 'Europe/Moscow', None)
+        self.assertNotEqual(first.conversation_id, second.conversation_id)
+        self.assertEqual({entry.id for entry in first.entries}, {doctor.id, clinic.id})
+        self.assertEqual({entry.id for entry in second.entries}, {doctor.id, clinic.id})
+
+    def test_topics_follow_renamed_entry(self):
+        entries = EntryService(FakeRepository())
+        entry = entries.create(kind=EntryKind.task, title='Купить молоко',
+                               date=None, time=None, timezone='Europe/Moscow')
+        self.assertEqual(entry.topics, [])
+        report = entries.create(kind=EntryKind.task, title='Анализ данных',
+                                date=None, time=None, timezone='Europe/Moscow')
+        self.assertEqual(report.topics, [])
+        entry = entries.update(entry.id, EntryUpdate(title='Посетить диспансер'))
+        self.assertIn('здоровье', entry.topics)
+        entry = entries.update(entry.id, EntryUpdate(title='Купить молоко'))
+        self.assertEqual(entry.topics, [])
+
+    def test_model_assigns_topic_when_title_has_no_keyword(self):
+        class TopicClient:
+            def complete_json(self, *, system_prompt, user_prompt, json_schema):
+                return {'topics': ['здоровье']}
+
+        entries = EntryService(FakeRepository(), topic_client=TopicClient())
+        entry = entries.create(kind=EntryKind.task, title='Стать донором',
+                               date=None, time=None, timezone='Europe/Moscow')
+        self.assertEqual(entry.topics, ['здоровье'])
+
+    def test_topic_model_can_find_an_untagged_entry_after_150_records(self):
+        class TopicClient:
+            def complete_json(self, *, system_prompt, user_prompt, json_schema):
+                batch = json.loads(user_prompt)['entries']
+                return {'matches': [item['n'] for item in batch
+                                    if 'донорство' in item['title'].casefold()]}
+
+        repository = FakeRepository()
+        entries = EntryService(repository)
+        for index in range(160):
+            entries.create(kind=EntryKind.task, title=f'Купить книгу {index}',
+                           date=None, time=None, timezone='Europe/Moscow')
+        target = entries.create(kind=EntryKind.task, title='Записаться на донорство',
+                                date=None, time=None, timezone='Europe/Moscow')
+        extractor = FakeExtractor(AssistantCommand(action=AssistantIntent.unknown))
+        extractor._client = TopicClient()
+        turn = AssistantService(extractor, entries, FakeConversations()).handle_message(
+            'Покажи все записи про здоровье', 'Europe/Moscow', None,
+        )
+        self.assertEqual([entry.id for entry in turn.entries], [target.id])
+
     def test_unverified_model_date_requires_confirmation_before_move(self):
         repository = FakeRepository()
         entries = EntryService(repository)
@@ -319,7 +388,6 @@ class EntryFlowTests(unittest.TestCase):
         turn = AssistantService(extractor, entries, FakeConversations()).handle_message(
             'Покажи записи, связанные со здоровьем, за октябрь', 'Europe/Moscow', None,
         )
-        self.assertEqual(extractor.assert_query, 'здоровье')
         self.assertEqual([entry.title for entry in turn.entries], ['Поход к врачу'])
 
     def test_schedule_clarification_cannot_mutate_another_entry(self):

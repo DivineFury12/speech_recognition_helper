@@ -132,6 +132,7 @@ def create_app(settings: src.settings.Settings | None = None) -> fastapi.FastAPI
                     name=config.embedding_model_name,
                     cache_dir=str(config.cache_dir.parent / 'embeddings'),
                 ),
+                topic_client=gigachat_client if config.gigachat_auth_key else None,
             )
             app.state.conversations = (
                 src.adapters.conversation_repository.SqlAlchemyConversationRepository(sessions)

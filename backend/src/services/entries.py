@@ -11,6 +11,7 @@ from src.ports.embeddings import EmbeddingModel, EmbeddingUnavailableError
 from src.ports.entries import EntryRepository
 from src.schemas.assistant import Entry, EntryKind, EntryStatus, EntryUpdate, Recurrence
 from src.services.recurrence import occurrences
+from src.services.topics import classify_entry_topics
 
 
 logger = logging.getLogger(__name__)
@@ -30,9 +31,11 @@ GENERIC_SEARCH_WORDS = {
 
 
 class EntryService:
-    def __init__(self, repository: EntryRepository, embedder: EmbeddingModel | None = None):
+    def __init__(self, repository: EntryRepository, embedder: EmbeddingModel | None = None,
+                 topic_client=None):
         self._repository = repository
         self._embedder = embedder
+        self._topic_client = topic_client
 
     def _embedding(self, text: str, *, query: bool = False) -> list[float] | None:
         if self._embedder is None:
@@ -99,6 +102,7 @@ class EntryService:
                 changes['duration_minutes'] = DEFAULT_MEETING_DURATION_MINUTES
         if 'title' in changes:
             changes['title'] = changes['title'].strip()
+            changes['topics'] = classify_entry_topics(changes['title'], self._topic_client)
         embedding = self._embedding(changes['title']) if 'title' in changes else None
         return self._repository.update(
             entry_id, changes, embedding=embedding,
@@ -210,6 +214,7 @@ class EntryService:
         embedding = self._embedding(title)
         kwargs = {'recurrence': recurrence} if recurrence is not None else {}
         kwargs.update({k: v for k, v in extra.items() if v is not None})
+        kwargs['topics'] = classify_entry_topics(title, self._topic_client)
         return self._repository.create(
             kind=kind, title=title, date=date, time=time, timezone=timezone,
             embedding=embedding, duration_minutes=duration_minutes,
@@ -228,6 +233,7 @@ class EntryService:
         embedding = self._embedding(title)
         kwargs = {'recurrence': recurrence} if recurrence is not None else {}
         kwargs.update({k: v for k, v in extra.items() if v is not None})
+        kwargs['topics'] = classify_entry_topics(title, self._topic_client)
         return self._repository.create_once(
             kind=kind, title=title, date=date, time=time, timezone=timezone,
             embedding=embedding, duration_minutes=duration_minutes,

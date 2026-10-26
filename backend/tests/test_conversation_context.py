@@ -1,5 +1,10 @@
 import unittest
+import datetime
+import uuid
 
+from src.ports.conversations import ConversationState
+from src.schemas.assistant import ConversationMessage
+from src.services.assistant import AssistantService
 from src.services.conversation_context import select_conversation_context
 
 
@@ -62,6 +67,51 @@ class ConversationContextTests(unittest.TestCase):
             {'role': message['role'], 'text': message['text'][:1000]}
             for message in history[-6:]
         ])
+
+    def test_saved_summary_is_always_sent_before_recent_turns(self):
+        history = [{'role': 'summary', 'text': 'Пользователь обсуждает поездку в Казань.'}]
+        history.extend({'role': 'user' if index % 2 == 0 else 'assistant',
+                        'text': f'Сообщение {index}'} for index in range(8))
+        selected = select_conversation_context(history, 'Когда вылет?')
+        self.assertEqual(selected[0], history[0])
+        self.assertEqual(selected[-1], history[-1])
+        self.assertEqual(len([item for item in selected if item['role'] == 'summary']), 1)
+
+    def test_old_turns_are_summarized_for_one_conversation(self):
+        class Summarizer:
+            def summarize_history(self, previous, messages):
+                self.seen = (previous, messages)
+                return 'Обсуждали поездку в Казань.'
+
+        class Store:
+            def save_summary(self, conversation_id, summary, count):
+                self.saved = (conversation_id, summary, count)
+
+        messages = [ConversationMessage(
+            id=uuid.uuid4(), role='user' if index % 2 == 0 else 'assistant',
+            text=f'Реплика {index}', created_at=datetime.datetime.now(datetime.timezone.utc),
+        ) for index in range(18)]
+        state = ConversationState(id=uuid.uuid4(), pending_command=None, messages=messages)
+        extractor, store = Summarizer(), Store()
+        compacted = AssistantService(extractor, conversations=store)._refresh_summary(state)
+        self.assertEqual(len(extractor.seen[1]), 12)
+        self.assertEqual(store.saved, (state.id, 'Обсуждали поездку в Казань.', 12))
+        self.assertEqual(compacted.model_history()[0]['role'], 'summary')
+        self.assertEqual(len(compacted.model_history()), 7)
+        self.assertEqual(state.summarized_message_count, 0)
+        more = [ConversationMessage(
+            id=uuid.uuid4(), role='user' if index % 2 == 0 else 'assistant',
+            text=f'Новая реплика {index}', created_at=datetime.datetime.now(datetime.timezone.utc),
+        ) for index in range(12)]
+        continued = AssistantService(extractor, conversations=store)._refresh_summary(
+            ConversationState(id=state.id, pending_command=None, messages=messages + more,
+                              summary=compacted.summary,
+                              summarized_message_count=compacted.summarized_message_count),
+        )
+        self.assertEqual(extractor.seen[0], 'Обсуждали поездку в Казань.')
+        self.assertEqual(continued.summarized_message_count, 24)
+        fresh = ConversationState(id=uuid.uuid4(), pending_command=None, messages=[])
+        self.assertEqual(fresh.model_history(), [])
 
 
 if __name__ == '__main__':

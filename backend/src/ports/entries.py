@@ -28,6 +28,7 @@ class EntryRepository(typing.Protocol):
         time: str | None, timezone: str, embedding: list[float] | None,
         embedding_model: str | None, duration_minutes: int | None = None,
         recurrence: Recurrence | None = None,
+        topics: list[str] | None = None,
     ) -> Entry: ...
 
     def create_once(
@@ -35,6 +36,7 @@ class EntryRepository(typing.Protocol):
         time: str | None, timezone: str, embedding: list[float] | None,
         embedding_model: str | None, duration_minutes: int | None = None,
         recurrence: Recurrence | None = None,
+        topics: list[str] | None = None,
     ) -> tuple[Entry, bool]: ...
 
     def list_period(

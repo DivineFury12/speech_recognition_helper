@@ -52,6 +52,7 @@ class Entry(pydantic.BaseModel):
     id: uuid.UUID
     kind: EntryKind
     title: str
+    topics: list[str] | None = None
     date: datetime.date | None
     time: str | None
     timezone: str

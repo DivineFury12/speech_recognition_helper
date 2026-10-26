@@ -290,6 +290,26 @@ class ExternalCommandExtractor:
         self._client = client
         self._temporal_retry = temporal_retry
 
+    def summarize_history(self, previous: str | None, messages: list[dict[str, str]]) -> str:
+        """Compact older dialogue only; saved entries remain authoritative in the database."""
+        payload = self._client.complete_json(
+            system_prompt=(
+                'Обнови краткую память только этого диалога. Сохрани явные предпочтения, '
+                'незавершённые вопросы и важные ссылки на предыдущие реплики. '
+                'Не выдумывай факты и не считай эту память списком сохранённых событий: '
+                'события берутся из базы данных. Верни JSON с полем summary, до 1800 символов.'
+            ),
+            user_prompt=json.dumps({'previous_summary': previous, 'messages': messages}, ensure_ascii=False),
+            json_schema={
+                'type': 'object', 'properties': {'summary': {'type': 'string'}},
+                'required': ['summary'], 'additionalProperties': False,
+            },
+        )
+        summary = payload.get('summary') if isinstance(payload, dict) else None
+        if not isinstance(summary, str) or not summary.strip() or len(summary) > 1800:
+            raise InvalidModelResponseError('Не удалось сжать историю диалога')
+        return summary.strip()
+
     @staticmethod
     def _validated_period(
         text: str, today: datetime.date, evidence: PeriodEvidence,

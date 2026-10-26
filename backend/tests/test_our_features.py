@@ -26,7 +26,7 @@ class RecurringRepository(FakeRepository):
                duration_minutes=None, recurrence=None, **extra):
         entry = super().create(kind=kind, title=title, date=date, time=time, timezone=timezone,
                                embedding=embedding, embedding_model=embedding_model,
-                               duration_minutes=duration_minutes)
+                               duration_minutes=duration_minutes, topics=extra.pop('topics', None))
         entry = entry.model_copy(update={'recurrence': recurrence, **extra})
         self.items[-1] = entry
         return entry

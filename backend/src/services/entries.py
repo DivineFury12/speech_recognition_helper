@@ -208,6 +208,8 @@ class EntryService:
         time: str | None, timezone: str, duration_minutes: int | None = None,
         recurrence: Recurrence | None = None, **extra,
     ) -> Entry:
+        if time is not None and date is None:
+            raise ValueError('Время требует даты')
         duration_minutes = self._duration_for_create(kind, duration_minutes)
         if recurrence is not None and date is None:
             raise ValueError('Для повторяющейся записи нужна дата')
@@ -228,6 +230,8 @@ class EntryService:
         recurrence: Recurrence | None = None, **extra,
     ) -> tuple[Entry, bool]:
         """Return the matching pending entry when the same command is repeated."""
+        if time is not None and date is None:
+            raise ValueError('Время требует даты')
         title = ' '.join(title.split())
         duration_minutes = self._duration_for_create(kind, duration_minutes)
         embedding = self._embedding(title)

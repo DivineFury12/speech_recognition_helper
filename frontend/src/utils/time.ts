@@ -12,5 +12,7 @@ export function addDays(d: Date, n: number): Date {
 
 export function formatDate(date: string): string {
   const [y, m, d] = date.split('-').map(Number)
-  return new Date(y, m - 1, d).toLocaleDateString('ru-RU', { weekday: 'short', day: 'numeric', month: 'short' })
+  const options: Intl.DateTimeFormatOptions = { weekday: 'short', day: 'numeric', month: 'short' }
+  if (y !== Number(isoDate(new Date()).slice(0, 4))) options.year = 'numeric'
+  return new Date(y, m - 1, d).toLocaleDateString('ru-RU', options)
 }

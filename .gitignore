@@ -41,3 +41,4 @@ Thumbs.db
 /backend/data/
 /backend/.cache/
 .live_eval.json
+/frontend/public/csv-review.json

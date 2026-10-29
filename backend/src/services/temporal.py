@@ -61,9 +61,14 @@ HOUR_PATTERN = rf'(?:\d{{1,2}}|{HOUR_PATTERN})'
 COUNT_PATTERN = rf'(?:\d{{1,4}}|{HOUR_PATTERN})'
 DATE_UNIT_PATTERN = r'(?P<unit>недел\w*|день|дня|дней|сутк\w*|суток|месяц\w*|год\w*|лет)'
 MONTH_PATTERN = '|'.join(
-    [rf'{stem}\w*' for stem in MONTHS if not stem.startswith('ма')]
+    [rf'{stem}\w*' for stem, month in MONTHS.items() if month != 5]
     + [r'ма[йяею]']
     + [rf'{stem}\.?(?!\w)' for stem in MONTH_ABBREVIATIONS]
+)
+NAMED_DATE_RE = re.compile(
+    rf'(?<!\d)(?P<day>\d{{1,2}})(?:-?го)?\s+'
+    rf'(?P<month>{MONTH_PATTERN})\.?(?!\w)'
+    r'(?:\s+(?P<year>\d{4})(?!\d))?', re.IGNORECASE,
 )
 
 TITLE_STOPWORDS = {
@@ -190,12 +195,12 @@ def parse_date(phrase: str, today: datetime.date) -> datetime.date | None:
             int(numeric.group(3)) if numeric.group(3) else None, today,
         )
 
-    month_match = re.search(
-        rf'(?<!\d)(?P<day>\d{{1,2}})\s+(?P<month>{MONTH_PATTERN})\.?(?!\w)', value,
-    )
+    month_match = NAMED_DATE_RE.search(value)
     if month_match:
         return _calendar_date(int(month_match.group('day')),
-                              _month_number(month_match.group('month')), None, today)
+                              _month_number(month_match.group('month')),
+                              int(month_match.group('year')) if month_match.group('year') else None,
+                              today)
 
     day_of_month = re.search(r'(?<!\d)(?P<day>\d{1,2})(?:-?го)?\s+числа\b', value)
     if day_of_month:
@@ -381,7 +386,8 @@ def parse_period(text: str, today: datetime.date) -> tuple[datetime.date, dateti
         if re.search(r'\b(?:втор\w*|2-?й)\s+половин\w*\b', value):
             return max(today, start + datetime.timedelta(days=3)), start + datetime.timedelta(days=6)
         return start, start + datetime.timedelta(days=2)
-    if re.search(r'\b(?:на|за|в)\s+(?:эт\w*|текущ\w*)\s+недел\w*\b', value):
+    if re.search(r'\b(?:(?:на|за|в)\s+)?(?:эт\w*|текущ\w*)\s+недел\w*\b', value):
+
         start = today - datetime.timedelta(days=today.weekday())
         return start, start + datetime.timedelta(days=6)
     if re.search(r'\b(?:на|за)\s+недел\w*\b', value) and 'через' not in value:
@@ -663,7 +669,8 @@ SEARCH_FILTER_WORDS = TITLE_STOPWORDS | {
     'какие', 'какая', 'какой', 'есть', 'выведи', 'перечисли', 'найди',
     'поищи', 'все', 'моих', 'планы', 'планов', 'дела', 'делах',
     'события', 'событий', 'событие', 'запланировано', 'связанные',
-    'связанных', 'связано', 'этот', 'этом', 'текущий', 'текущем', 'прошлый',
+    'связанных', 'связано', 'этот', 'этом', 'этой', 'эту', 'этих',
+    'текущий', 'текущем', 'текущей', 'прошлый',
     'прошлом', 'следующий', 'следующем', 'ближайший', 'ближайшую',
 }
 SEARCH_FILTER_STEMS = (
@@ -724,6 +731,7 @@ def verify_creation_fields(
         date = None
     elif (date_evidence and date is None and command.date is not None
           and getattr(command.date_relation, 'value', command.date_relation) == 'exact'
+          and parse_time(command.date_phrase) is None
           and not re.search(r'(?<!\d)\d{4}-\d{1,2}-\d{1,2}|(?<!\d)\d{1,2}[./]\d{1,2}',
                             command.date_phrase)):
         date, date_unverified = command.date, True
@@ -793,6 +801,7 @@ def verify_mutation_fields(
             date = None
         elif (date_evidence and date is None and command.date is not None
               and getattr(command.date_relation, 'value', command.date_relation) == 'exact'
+              and parse_time(command.date_phrase) is None
               and not re.search(r'(?<!\d)\d{4}-\d{1,2}-\d{1,2}|(?<!\d)\d{1,2}[./]\d{1,2}',
                                 command.date_phrase)):
             date, date_unverified = command.date, True

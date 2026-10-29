@@ -3,7 +3,7 @@ import { computed, ref } from 'vue'
 import type { Entry, Recurrence } from '@/api/types'
 import { formatDate } from '@/utils/time'
 
-const props = defineProps<{ entry: Entry; compact?: boolean; showDate?: boolean }>()
+const props = defineProps<{ entry: Entry; compact?: boolean; showDate?: boolean; readonly?: boolean }>()
 const emit = defineEmits<{
   toggle: [entry: Entry]
   open: [entry: Entry]
@@ -76,6 +76,7 @@ function onTouchEnd() {
 }
 
 function openCard() {
+  if (props.readonly) return
   if (offset.value !== 0) {
     offset.value = 0
     return

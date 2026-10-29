@@ -2,7 +2,7 @@
 
 import re
 
-from src.services.temporal import verify_search_query
+from src.services.temporal import NAMED_DATE_RE, verify_search_query
 
 YES_WORDS = ('да', 'ага', 'угу', 'ок', 'окей', 'давай', 'конечно', 'верно', 'удаляй',
              'ставь', 'подтверждаю', 'точно', 'хорошо', 'ладно', 'yes')
@@ -147,8 +147,11 @@ def restore_numbers(title: str | None, text: str) -> str | None:
     if not title:
         return title
     missing = []
+    calendar_spans = [match.span() for match in NAMED_DATE_RE.finditer(text)]
     for match in re.finditer(r'(?<![\d:.,/-])\d+(?![\d:.,/-]?\d)', text):
         before, after = text[:match.start()].casefold(), text[match.end():]
+        if any(start <= match.start() < end for start, end in calendar_spans):
+            continue
         if _SCHEDULE_NUMBER.search(before) or _SCHEDULE_AFTER.match(after):
             continue
         if match.group() not in re.findall(r'\d+', title):

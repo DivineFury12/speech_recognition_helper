@@ -1,11 +1,14 @@
 import unittest
 import datetime
 import uuid
+from unittest.mock import patch
 
 from src.ports.conversations import ConversationState
 from src.schemas.assistant import ConversationMessage
 from src.services.assistant import AssistantService
 from src.services.conversation_context import select_conversation_context
+from src.services.command_extractor import TurnKind, TurnRoute
+from src.schemas.assistant import AssistantIntent
 
 
 class ConversationContextTests(unittest.TestCase):
@@ -112,6 +115,38 @@ class ConversationContextTests(unittest.TestCase):
         self.assertEqual(continued.summarized_message_count, 24)
         fresh = ConversationState(id=uuid.uuid4(), pending_command=None, messages=[])
         self.assertEqual(fresh.model_history(), [])
+
+    def test_route_receives_refreshed_summary_before_command_processing(self):
+        messages = [ConversationMessage(
+            id=uuid.uuid4(), role='user' if index % 2 == 0 else 'assistant',
+            text=f'Реплика {index}', created_at=datetime.datetime.now(datetime.timezone.utc),
+        ) for index in range(18)]
+        state = ConversationState(id=uuid.uuid4(), pending_command=None, messages=messages)
+
+        class Store:
+            def get(self, conversation_id):
+                return state
+
+            def save_summary(self, conversation_id, summary, count):
+                self.saved = (summary, count)
+
+        class Extractor:
+            def summarize_history(self, previous, chunk):
+                return 'Обсуждали поездку.'
+
+            def classify_turn_detailed(self, text, timezone, today, *, pending, history):
+                self.history = history
+                return TurnRoute(kind=TurnKind.command, action=AssistantIntent.unknown)
+
+        extractor, store = Extractor(), Store()
+        service = AssistantService(extractor, conversations=store)
+        sentinel = object()
+        with patch.object(service, '_handle_at', return_value=sentinel):
+            self.assertIs(service._handle_many('Продолжим', 'Europe/Moscow', state.id,
+                                               datetime.date(2026, 10, 29)), sentinel)
+        self.assertEqual(store.saved, ('Обсуждали поездку.', 12))
+        self.assertEqual(extractor.history[0], {'role': 'summary', 'text': 'Обсуждали поездку.'})
+        self.assertNotIn('Реплика 0', str(extractor.history))
 
 
 if __name__ == '__main__':

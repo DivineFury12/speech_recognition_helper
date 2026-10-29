@@ -1,4 +1,5 @@
 .main { grid-template-columns: minmax(0, 1fr) 400px; }
+.main.review-mode { grid-template-columns: minmax(0, 1fr); }
 .tabbar { display: none; }
 .agenda { display: flex; flex-direction: column; }
 .agenda-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 14px 14px 6px; }

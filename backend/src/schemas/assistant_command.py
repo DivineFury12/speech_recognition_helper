@@ -72,6 +72,13 @@ class BulkDeleteRequest(PeriodEvidence):
     scope: Literal['bulk', 'single', 'unclear']
 
 
+class RecurrenceWindow(PeriodEvidence):
+    """A bounded recurrence proposed from quoted words in a create request."""
+
+    recurrence: Recurrence | None = None
+    recurrence_phrase: str | None = None
+
+
 class AssistantCommand(pydantic.BaseModel):
     model_config = pydantic.ConfigDict(extra='forbid')
 
@@ -104,6 +111,7 @@ class AssistantCommand(pydantic.BaseModel):
     new_title: str | None = None
     # Server-owned selection state. Never include IDs in the provider schema.
     candidate_ids: list[uuid.UUID] | None = None
+    bulk_occurrences: dict[str, list[datetime.date]] | None = None
     remaining_requests: list[str] | None = pydantic.Field(default=None, max_length=4)
     selected_entry_id: uuid.UUID | None = None
     move_intent: bool | None = None
@@ -165,7 +173,7 @@ class AssistantCommand(pydantic.BaseModel):
     def provider_schema(cls) -> dict:
         """Require explicit nulls so the model cannot silently omit fields."""
         schema = cls.model_json_schema()
-        for name in ('candidate_ids', 'remaining_requests', 'selected_entry_id', 'move_intent',
+        for name in ('candidate_ids', 'bulk_occurrences', 'remaining_requests', 'selected_entry_id', 'move_intent',
                      'pending_step', 'signals_verified', 'recurrence', 'confirm',
                      'date_unverified', 'time_unverified', 'date_window_start',
                      'date_window_end', 'preferred_daypart',

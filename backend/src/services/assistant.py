@@ -12,11 +12,15 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from src.ports.command_extractor import CommandExtractor
 from src.ports.conversations import ConversationRepository, ConversationState
+from src.db_transaction import request_savepoint
+
 from src.schemas.assistant import (AssistantIntent, AssistantResponse, AssistantStatus, AssistantTurn, Entry, EntryKind,
-                                   EntryStatus, EntryUpdate)
-from src.schemas.assistant_command import AssistantCommand
-from src.schemas.dialogue import DialogueTransition, PendingStep, ReplyAct, ScheduleRole
+                                   EntryStatus, EntryUpdate, Recurrence)
+from src.schemas.assistant_command import AssistantCommand, DateRelation
+from src.schemas.dialogue import (DialogueTransition, PendingReply, PendingStep,
+                                  ReplyAct, ScheduleRole)
 from src.services import phrasing
+from src.services.command_extractor import SpecialMutation, TurnKind, TurnRoute
 from src.services.command_interpreter import CommandInterpreter
 from src.services.conversation_context import RECENT_MESSAGES
 from src.services.dialogue_interpreter import DialogueInterpreter
@@ -27,10 +31,11 @@ from src.services.guards import (CHOICE_WORDS, DONE_RE, HELP_SUGGESTIONS, HELP_T
                                  find_shift, find_until, is_short_unclear, restore_numbers,
                                  requests_bulk_mutation, yes_no)
 from src.adapters.rules_model import command_from_rules
-from src.services.recurrence import INTERVAL_RE, PATTERNS as RECURRENCE_PATTERNS, find_interval, find_recurrence, first_date, label, next_occurrence
+from src.services.recurrence import INTERVAL_RE, PATTERNS as RECURRENCE_PATTERNS, find_interval, find_recurrence, first_date, label, next_occurrence, occurrences
 from src.services.batch import TOPIC_LIST_RX, apply_filter, bulk_filter, expand_creations
 from src.services.guards import COMPLETE_PHRASE_RE, SAME_AS_RE, SMALL_TALK_RE, UNDATED_RE
 from src.services.spoken import normalize_request, relative_minutes, spoken_time
+
 from src.user_context import current_user
 from src.services.quick_answers import QuickAnswers
 from src.services.undo import UndoStack
@@ -38,8 +43,9 @@ from src.services.temporal import (ambiguous_time_options, ambiguous_time_phrase
                                    daypart_of_time, mentioned_entry_kind, parse_date, parse_daypart, parse_duration,
                                    parse_period, parse_target_date, parse_time,
                                    replacement_schedule_reply, resolve_time_clarification,
-                                   time_constraint_phrase)
+                                   time_constraint_phrase, verify_search_query)
 from src.services.topics import classify_entry_topics, topic_key
+
 
 SPLIT_RE = re.compile(
     r'\s*,?\s+(?:и|а\s+также|а\s+потом|потом|затем)\s+(?=(?:ещё\s+|еще\s+|мне\s+)?(?:поставь|создай|добавь|'
@@ -119,9 +125,10 @@ class AssistantService(QuickAnswers, UndoStack):
                 missing.append('тип записи')
             if command.title is None:
                 missing.append('название')
+            if command.date is None and (command.time is not None or command.kind in (
+                    EntryKind.meeting, EntryKind.reminder)):
+                missing.append('дату')
             if command.kind in (EntryKind.meeting, EntryKind.reminder):
-                if command.date is None:
-                    missing.append('дату')
                 if command.time is None:
                     missing.append('время')
         elif command.action == AssistantIntent.list_entries:
@@ -292,24 +299,35 @@ class AssistantService(QuickAnswers, UndoStack):
         now = cls._now()
         today = now.date()
         if date < today:
-            return (f'{phrasing.format_date(date, today).capitalize()} — это '
-                    f'{phrasing.format_day(date, today)}, этот день уже прошёл.')
+            day = phrasing.format_day(date, today)
+            if date == today - datetime.timedelta(days=1):
+                return f'Вчера — это {day}, этот день уже прошёл.'
+            if date == today - datetime.timedelta(days=2):
+                return f'Позавчера — это {day}, этот день уже прошёл.'
+            return f'Дата {day} уже прошла.'
         if date == today and time is not None and time < now.strftime('%H:%M'):
             return f'Сегодня в {time} — это время уже прошло.'
         return None
+
+    @staticmethod
+    def _meeting_overlaps(date: datetime.date, time: str, duration: int | None,
+                          other: Entry) -> bool:
+        if other.time is None or other.status == EntryStatus.completed:
+            return False
+        start = datetime.datetime.combine(date, datetime.time.fromisoformat(time))
+        end = start + datetime.timedelta(minutes=duration or 60)
+        other_start = datetime.datetime.combine(date, datetime.time.fromisoformat(other.time))
+        other_end = other_start + datetime.timedelta(minutes=other.duration_minutes or 60)
+        return start < other_end and other_start < end
 
     def _conflict(self, kind: EntryKind | None, date: datetime.date | None, time: str | None,
                   duration: int | None, exclude: uuid.UUID | None = None) -> Entry | None:
         if kind != EntryKind.meeting or date is None or time is None or self._entries is None:
             return None
-        start = datetime.datetime.combine(date, datetime.time.fromisoformat(time))
-        end = start + datetime.timedelta(minutes=duration or 60)
         for other in self._entries.list_period(date, date, kind=EntryKind.meeting):
-            if other.id == exclude or other.time is None or other.status == EntryStatus.completed:
+            if other.id == exclude:
                 continue
-            other_start = datetime.datetime.combine(date, datetime.time.fromisoformat(other.time))
-            other_end = other_start + datetime.timedelta(minutes=other.duration_minutes or 60)
-            if start < other_end and other_start < end:
+            if self._meeting_overlaps(date, time, duration, other):
                 return other
         return None
 
@@ -495,15 +513,29 @@ class AssistantService(QuickAnswers, UndoStack):
     ) -> AssistantTurn:
         """Execute independent commands and resume queued ones after clarification."""
         pending = None
+        state = None
+        if (conversation_id is not None and self._conversations is not None
+                and hasattr(self._conversations, 'is_foreign')
+                and self._conversations.is_foreign(conversation_id)):
+            conversation_id = None
         if conversation_id is not None and self._conversations is not None:
             state = self._conversations.get(conversation_id)
             pending = state.pending_command if state else None
-        if pending is not None:
+            state = self._refresh_summary(state)
+        route, route_action, route_error = self._classify_turn(
+            text, timezone, today, state if conversation_id else None)
+        if route_error is not None:
+            return self._turn(conversation_id or uuid.uuid4(), text,
+                              AssistantCommand(action=AssistantIntent.unknown),
+                              route_error, AssistantStatus.no_action, [])
+        if pending is not None and route != TurnKind.batch:
             queued = pending.remaining_requests or []
             token = _batch_remaining.set(queued)
             interruption_token = _batch_interrupted.set(False)
             try:
-                first = self._handle_at(text, timezone, conversation_id, today)
+                first = self._handle_at(text, timezone, conversation_id, today,
+                                        route=route, route_action=route_action,
+                                        route_checked=True)
                 interrupted = _batch_interrupted.get()
             finally:
                 _batch_interrupted.reset(interruption_token)
@@ -512,10 +544,22 @@ class AssistantService(QuickAnswers, UndoStack):
                 return first
             rest = self._run_parts(queued, timezone, first.conversation_id, today)
             return self._combine_turns(text, [first, rest])
-        parts = [p.strip(' ,.') for p in SPLIT_RE.split(text) if p and p.strip(' ,.')]
-        if len(parts) < 2:
-            parts = expand_creations(text) or parts
-        if len(parts) < 2 and re.search(
+        if route == TurnKind.batch:
+            split = getattr(self._extractor, 'split_requests', None)
+            parts = split(text) if callable(split) else [text]
+            if len(parts) < 2:
+                return self._turn(conversation_id or uuid.uuid4(), text,
+                                  AssistantCommand(action=AssistantIntent.unknown),
+                                  'Не удалось надёжно разделить действия. Уточните их по одному; '
+                                  'записи не изменены.', AssistantStatus.no_action, [])
+        elif route is None:
+            parts = [p.strip(' ,.') for p in SPLIT_RE.split(text) if p and p.strip(' ,.')]
+            if len(parts) < 2:
+                parts = expand_creations(text) or parts
+        else:
+            parts = [text]
+        if len(parts) < 2 and route is None and re.search(
+
             r'\b(?:создай|добавь|поставь|запланируй|запиши|напомни)\b',
             text, re.IGNORECASE,
         ) and re.search(r'\b(?:и|а|также|затем|потом)\b', text, re.IGNORECASE):
@@ -523,8 +567,74 @@ class AssistantService(QuickAnswers, UndoStack):
             if callable(split):
                 parts = split(text)
         if len(parts) < 2:
-            return self._handle_at(text, timezone, conversation_id, today)
+            return self._handle_at(text, timezone, conversation_id, today,
+                                   route=route, route_action=route_action, route_checked=True)
         return self._run_parts(parts, timezone, conversation_id, today)
+
+    def _classify_turn(self, text: str, timezone: str, today: datetime.date, state):
+        detailed = getattr(self._extractor, 'classify_turn_detailed', None)
+        classify = getattr(self._extractor, 'classify_turn', None)
+        classifier = detailed if callable(detailed) else classify
+        if not callable(classifier):
+            return None, None, None
+        history = self._model_history(state)
+        try:
+            decision = classifier(text, timezone, today,
+                                  pending=state.pending_command if state else None,
+                                  history=history)
+            if isinstance(decision, TurnRoute):
+                route, action = decision.kind, decision.action
+                expected = ({TurnKind.bulk_delete: AssistantIntent.delete_entry,
+                             TurnKind.stop_series: AssistantIntent.update_entry,
+                             TurnKind.set_priority: AssistantIntent.update_entry,
+                             TurnKind.set_lead: AssistantIntent.update_entry}).get(route)
+                if (expected is not None and action is not None and action != expected
+                        or route in (TurnKind.undo, TurnKind.batch, TurnKind.pending_reply)
+                        and action is not None):
+                    return None, None, 'Модель вернула противоречивое действие. Ничего не изменено.'
+                if route == TurnKind.pending_reply and (state is None or state.pending_command is None):
+                    return None, None, 'Нет ожидающего уточнения. Повторите команду целиком.'
+                route, action = self._reconcile_candidate_route(route, action, state, text, today)
+                return route, action, None
+            route, action = self._reconcile_candidate_route(decision, None, state, text, today)
+            return route, action, None
+        except Exception:
+            logger.warning('Turn routing unavailable', exc_info=True)
+            pending = state.pending_command if state else None
+            if pending is not None:
+                if pending.confirm and yes_no(text) in ('yes', 'no'):
+                    return TurnKind.pending_reply, None, None
+                route, action = self._reconcile_candidate_route(None, None, state, text, today)
+                if route == TurnKind.pending_reply:
+                    return route, action, None
+            return None, None, 'Не удалось надёжно определить действие. Повторите запрос; записи не изменены.'
+
+    def _reconcile_candidate_route(self, route, action, state, text, today):
+        """An explicitly selected stored candidate outranks a mistaken new-command route."""
+        pending = state.pending_command if state else None
+        if (route == TurnKind.pending_reply or pending is None
+                or not pending.candidate_ids or self._entries is None):
+            return route, action
+        candidates = [self._entries.get(entry_id) for entry_id in pending.candidate_ids]
+        candidates = [entry for entry in candidates if entry is not None]
+        if not candidates:
+            return route, action
+        choice = self._dialogue.resolve_candidate(text, candidates, pending, None, today)
+        return (TurnKind.pending_reply, None) if choice.selected is not None else (route, action)
+
+    def _model_history(self, state) -> list[dict[str, str]]:
+        history = state.model_history() if state else []
+        if state is not None and state.last_entry_id is not None and self._entries is not None:
+            entry = self._entries.get(state.last_entry_id)
+            if entry is not None:
+                history.append({
+                    'role': 'assistant',
+                    'text': (f'Последняя однозначно выбранная запись: '
+                             f'{entry.kind.value} «{entry.title}»; '
+                             f'дата {entry.date.isoformat() if entry.date else "не задана"}; '
+                             f'время {entry.time or "не задано"}.'),
+                })
+        return history
 
     @staticmethod
     def _combine_turns(text: str, turns: list[AssistantTurn]) -> AssistantTurn:
@@ -550,16 +660,30 @@ class AssistantService(QuickAnswers, UndoStack):
         today: datetime.date,
     ) -> AssistantTurn:
         turns: list[AssistantTurn] = []
-        for index, part in enumerate(parts):
-            token = _batch_remaining.set(parts[index + 1:])
-            try:
-                turn = self._handle_at(part, timezone, conversation_id, today)
-            finally:
-                _batch_remaining.reset(token)
-            conversation_id = turn.conversation_id
-            turns.append(turn)
-            if turn.status == AssistantStatus.needs_clarification:
-                break
+        rolled_back = False
+        with request_savepoint() as savepoint:
+            for index, part in enumerate(parts):
+                token = _batch_remaining.set(parts[index + 1:])
+                try:
+                    turn = self._handle_at(part, timezone, conversation_id, today)
+                finally:
+                    _batch_remaining.reset(token)
+                conversation_id = turn.conversation_id
+                turns.append(turn)
+                if turn.status == AssistantStatus.no_action:
+                    if savepoint is not None:
+                        savepoint.rollback()
+                        rolled_back = True
+                    break
+                if turn.status == AssistantStatus.needs_clarification:
+                    break
+        if rolled_back:
+            return self._turn(
+                conversation_id, ' и '.join(parts),
+                AssistantCommand(action=AssistantIntent.unknown),
+                'Одно из действий не удалось выполнить. Все изменения этого запроса отменены. '
+                'Уточните запрос и повторите его.', AssistantStatus.no_action, [],
+            )
         return self._combine_turns(' и '.join(parts), turns)
 
     def _topic_entries(self, topic: str, entries: list[Entry]) -> list[Entry]:
@@ -679,94 +803,107 @@ class AssistantService(QuickAnswers, UndoStack):
             return self._turn(conversation_id, text, command,
                               'За этот период подходящих записей нет. Ничего не удалено.',
                               AssistantStatus.no_action, [])
-        if len(unique) > 50:
+        if len(unique) > 50 or len(matches) > 100:
             return self._turn(conversation_id, text, command,
-                              f'Найдено {len(unique)} записей. Назовите более короткий период: '
-                              'за один раз можно удалить до 50 записей.',
+                              f'Найдено {len(matches)} событий. Назовите более короткий период: '
+                              'за один раз можно удалить до 100 событий из 50 записей.',
                               AssistantStatus.no_action, [])
+        recurring_days: dict[str, list[datetime.date]] = {}
+        for entry in matches:
+            if entry.recurrence is not None and entry.date is not None:
+                recurring_days.setdefault(str(entry.id), []).append(entry.date)
         pending = command.model_copy(update={
             'kind': kind,
             'confirm': 'bulk_delete', 'candidate_ids': [entry.id for entry in unique],
+            'bulk_occurrences': recurring_days,
         })
         lines = [phrasing.entry_line(entry, self._today(), show_date=True)[:85]
-                 for entry in unique[:8]]
-        rest = f'\n…и ещё {len(unique) - 8}.' if len(unique) > 8 else ''
-        series = (' Повторяющаяся запись будет удалена целиком.'
-                  if any(entry.recurrence for entry in unique) else '')
-        answer = (f'Удалить {len(unique)} {phrasing.plural(len(unique), "запись", "записи", "записей")}'
+                 for entry in matches[:8]]
+        rest = f'\n…и ещё {len(matches) - 8}.' if len(matches) > 8 else ''
+        series = (' Повторы за пределами периода останутся.'
+                  if recurring_days else '')
+        answer = (f'Удалить {len(matches)} {phrasing.plural(len(matches), "событие", "события", "событий")}'
                   f' за период {phrasing.format_day(period[0], self._today())} — '
                   f'{phrasing.format_day(period[1], self._today())}?\n'
                   + '\n'.join(lines) + rest + series + '\nПодтвердите или отмените удаление.')
         return self._turn(conversation_id, text, command, answer,
-                          AssistantStatus.needs_clarification, unique[:8], pending)
+                          AssistantStatus.needs_clarification, matches[:8], pending)
 
     def _guard(
         self, conversation_id: uuid.UUID, text: str, timezone: str,
-        state,
+        state, route: TurnKind | None = None,
     ) -> tuple[AssistantTurn | None, object]:
         """Our checks that run before the dialogue engine: undo, confirmations, «я купил»."""
         previous = state.pending_command if state is not None else None
-        spec = (bulk_filter(text, self._today(), self._now().strftime('%H:%M'))
-                if self._entries is not None and hasattr(self._entries, 'all_entries') else None)
-        if spec is not None and not (
-            spec['status'] or spec['past'] or spec['topic'] or spec['undated'] or spec.get('error')
-            or re.search(r'\b(?:после|до)\s|\b(?:январ|феврал|март|апрел|ма[йя]|июн|июл|август|сентябр|'
-                         r'октябр|ноябр|декабр)\w*', text, re.IGNORECASE)
-            or (spec['date_from'] is None and spec['date_to'] is None
-                and parse_period(text, self._today()) is None)
-        ):
-            spec = None
-        if spec is not None:
-            if previous is not None:
-                _batch_interrupted.set(True)
-            return self._bulk_by_filter(conversation_id, text, spec), state
-        topic_list = TOPIC_LIST_RX.match(text) if self._entries is not None else None
-        if topic_list:
-            return self._list_by_topic(conversation_id, text, topic_list.group('topic')), state
-        complete_phrase = COMPLETE_PHRASE_RE.match(text) if self._entries is not None else None
-        if complete_phrase:
-            entry = self._find_one(complete_phrase.group('what'), state)
-            if entry is not None:
+        if route is None:
+            spec = (bulk_filter(text, self._today(), self._now().strftime('%H:%M'))
+                    if self._entries is not None and hasattr(self._entries, 'all_entries') else None)
+            if spec is not None and not (
+                spec['status'] or spec['past'] or spec['topic'] or spec['undated'] or spec.get('error')
+                or re.search(r'\b(?:после|до)\s|\b(?:январ|феврал|март|апрел|ма[йя]|июн|июл|август|сентябр|'
+                             r'октябр|ноябр|декабр)\w*', text, re.IGNORECASE)
+                or (spec['date_from'] is None and spec['date_to'] is None
+                    and parse_period(text, self._today()) is None)
+            ):
+                spec = None
+            if spec is not None:
                 if previous is not None:
                     _batch_interrupted.set(True)
-                command = AssistantCommand(action=AssistantIntent.complete_entry,
-                                           target_query=complete_phrase.group('what'))
-                return self._mutate(conversation_id, text, command, entry), state
-        if (previous is not None and previous.action == AssistantIntent.create_entry and not previous.confirm
-                and SAME_AS_RE.search(text) and self._entries is not None and state is not None):
-            source = self._reference_entry(conversation_id, text, state)
-            if source is not None:
-                filled = previous.model_copy(update={
-                    'kind': previous.kind or source.kind,
-                    'title': previous.title or source.title,
-                    'date': previous.date or source.date,
-                    'time': previous.time or source.time,
-                    'duration_minutes': previous.duration_minutes or source.duration_minutes,
-                    'candidate_ids': None, 'pending_step': None,
-                })
-                return self._create(conversation_id, text, filled, 'Europe/Moscow'
-                                    if not source.timezone else source.timezone), state
-        if (previous is None and SAME_AS_RE.search(text) and self._entries is not None and state is not None
-                and not re.search(r'\b(?:удали|перенеси|сдвинь|отметь|покажи|найди)\b', text, re.IGNORECASE)):
-            # «Сделай такую же, как в первом сообщении, но на 17:00»: copy that record, change what was said.
-            source = self._reference_entry(conversation_id, text, state)
-            if source is not None:
-                today = self._today()
-                copy = AssistantCommand(
-                    action=AssistantIntent.create_entry, kind=source.kind, title=source.title,
-                    date=parse_date(text, today) or source.date, time=parse_time(text) or source.time,
-                    duration_minutes=source.duration_minutes if source.kind == EntryKind.meeting else None,
-                )
-                return self._create(conversation_id, text, copy, source.timezone), state
-        if previous is None and re.fullmatch(r'\s*(?:отмена|отмени(?:те)?|стоп|не\s+надо)\s*[.!]*\s*', text,
-                                             re.IGNORECASE):
-            command = AssistantCommand(action=AssistantIntent.unknown)
-            return self._turn(conversation_id, text, command,
-                              'Сейчас нечего отменять. Чтобы убрать последнее действие, скажите «Отмени последнее».',
-                              AssistantStatus.no_action, []), state
-        single = re.match(r'^\s*(?:удали|убери|отмени)\s+(?:эту\s+|мою\s+)?(?:встречу|задачу|напоминание|запись)\b(?!.*\b(?:все|всё|всех)\b)',
-                          text, re.IGNORECASE)
-        if requests_bulk_mutation(text, has_period=True) and not single:
+                return self._bulk_by_filter(conversation_id, text, spec), state
+            topic_list = TOPIC_LIST_RX.match(text) if self._entries is not None else None
+            if topic_list:
+                return self._list_by_topic(conversation_id, text, topic_list.group('topic')), state
+            complete_phrase = COMPLETE_PHRASE_RE.match(text) if self._entries is not None else None
+            if complete_phrase:
+                entry = self._find_one(complete_phrase.group('what'), state)
+                if entry is not None:
+                    if previous is not None:
+                        _batch_interrupted.set(True)
+                    command = AssistantCommand(action=AssistantIntent.complete_entry,
+                                               target_query=complete_phrase.group('what'))
+                    return self._mutate(conversation_id, text, command, entry), state
+            if (previous is not None and previous.action == AssistantIntent.create_entry and not previous.confirm
+                    and SAME_AS_RE.search(text) and self._entries is not None and state is not None):
+                source = self._reference_entry(conversation_id, text, state)
+                if source is not None:
+                    filled = previous.model_copy(update={
+                        'kind': previous.kind or source.kind,
+                        'title': previous.title or source.title,
+                        'date': previous.date or source.date,
+                        'time': previous.time or source.time,
+                        'duration_minutes': previous.duration_minutes or source.duration_minutes,
+                        'candidate_ids': None, 'pending_step': None,
+                    })
+                    return self._create(conversation_id, text, filled, 'Europe/Moscow'
+                                        if not source.timezone else source.timezone), state
+            if (previous is None and SAME_AS_RE.search(text) and self._entries is not None and state is not None
+                    and not re.search(r'\b(?:удали|перенеси|сдвинь|отметь|покажи|найди)\b', text, re.IGNORECASE)):
+                # «Сделай такую же, как в первом сообщении, но на 17:00»: copy that record, change what was said.
+                source = self._reference_entry(conversation_id, text, state)
+                if source is not None:
+                    today = self._today()
+                    copy = AssistantCommand(
+                        action=AssistantIntent.create_entry, kind=source.kind, title=source.title,
+                        date=parse_date(text, today) or source.date, time=parse_time(text) or source.time,
+                        duration_minutes=source.duration_minutes if source.kind == EntryKind.meeting else None,
+                    )
+                    return self._create(conversation_id, text, copy, source.timezone), state
+            if previous is None and re.fullmatch(r'\s*(?:отмена|отмени(?:те)?|стоп|не\s+надо)\s*[.!]*\s*', text,
+                                                 re.IGNORECASE):
+                command = AssistantCommand(action=AssistantIntent.unknown)
+                return self._turn(conversation_id, text, command,
+                                  'Сейчас нечего отменять. Чтобы убрать последнее действие, скажите «Отмени последнее».',
+                                  AssistantStatus.no_action, []), state
+        if route in (TurnKind.stop_series, TurnKind.set_priority, TurnKind.set_lead):
+            special = self._special_mutation(conversation_id, text, route, state)
+            if special is not None:
+                return special, state
+        single = (re.match(r'^\s*(?:удали|убери|отмени)\s+(?:эту\s+|мою\s+)?'
+                           r'(?:встречу|задачу|напоминание|запись)\b(?!.*\b(?:все|всё|всех)\b)',
+                           text, re.IGNORECASE) if route is None else None)
+        if (route == TurnKind.bulk_delete or route is None and
+                requests_bulk_mutation(text, has_period=True) and not single):
+
             if previous is not None:
                 _batch_interrupted.set(True)
             classify = getattr(self._extractor, 'classify_bulk_delete', None)
@@ -803,16 +940,27 @@ class AssistantService(QuickAnswers, UndoStack):
                 ), state
             if parse_period(text, self._today()) is not None:
                 return self._preview_bulk_delete(conversation_id, text), state
-        if UNDO_RE.match(text):
+        if (previous is not None and previous.confirm == 'undo'
+                and (route == TurnKind.pending_reply or len(text.split()) <= 3)):
+            turn = self._on_confirm(conversation_id, text, timezone, previous,
+                                    model_first=route is not None)
+            if turn is not None:
+                return turn, state
+        if route == TurnKind.undo or route is None and UNDO_RE.match(text):
             if previous is not None:
                 _batch_interrupted.set(True)
-            return self._undo_last(conversation_id, text), state
-        if (previous is not None and (previous.confirm or len(previous.candidate_ids or []) == 1)
+            return self._preview_undo(conversation_id, text), state
+        if (route is None and previous is not None
+                and (previous.confirm or len(previous.candidate_ids or []) == 1)
                 and not CHANGE_VERB_RE.search(text) and self._is_new_request(text)):
             _batch_interrupted.set(True)
             return None, dataclasses.replace(state, pending_command=None)
-        if previous is not None and previous.confirm:
-            turn = self._on_confirm(conversation_id, text, timezone, previous)
+        if (previous is not None and previous.confirm
+                and not previous.confirm.startswith('special:')
+                and route in (None, TurnKind.pending_reply)):
+            turn = self._on_confirm(conversation_id, text, timezone, previous,
+                                    model_first=route == TurnKind.pending_reply)
+
             if turn is not None:
                 return turn, state
             return None, dataclasses.replace(state, pending_command=None)
@@ -864,13 +1012,14 @@ class AssistantService(QuickAnswers, UndoStack):
                               'например «Удали встречу с Иваном».', AssistantStatus.no_action, []), state
         new_series = previous is not None and find_recurrence(text) is not None and re.match(
             r'^\s*(?:сделай|сделать|поставь|пусть|переведи|давай|повторяй)\b', text, re.IGNORECASE)
-        if (previous is None or new_series) and self._entries is not None:
+        if route is None and (previous is None or new_series) and self._entries is not None:
+
             turn = self._series_and_lead(conversation_id, text, state)
             if turn is not None:
                 if previous is not None:
                     _batch_interrupted.set(True)
                 return turn, state
-        done = DONE_RE.match(text) if previous is None else None
+        done = DONE_RE.match(text) if previous is None and route is None else None
         if done and self._entries is not None:
             matches, exact = self._entries.find_candidates(done.group('what'), kind=None)
             pending = [e for e in matches if e.status == EntryStatus.pending and e.kind != EntryKind.meeting]
@@ -878,6 +1027,102 @@ class AssistantService(QuickAnswers, UndoStack):
                 command = AssistantCommand(action=AssistantIntent.complete_entry, target_query=done.group('what'))
                 return self._mutate(conversation_id, text, command, pending[0]), state
         return None, state
+
+    def _special_mutation(self, conversation_id: uuid.UUID, text: str,
+                          route: TurnKind, state,
+                          details: SpecialMutation | None = None) -> AssistantTurn | None:
+        """Apply a model-classified special change after grounding its details."""
+        if self._entries is None:
+            return self._turn(conversation_id, text,
+                              AssistantCommand(action=AssistantIntent.update_entry),
+                              'База записей не подключена. Ничего не изменено.',
+                              AssistantStatus.no_action, [])
+        extract = getattr(self._extractor, 'extract_special', None)
+        if not callable(extract):
+            return None
+        history = self._model_history(state)
+        if details is None:
+            try:
+                details = extract(text, route, history=history)
+            except Exception:
+                logger.warning('Special mutation extraction unavailable', exc_info=True)
+                return self._turn(conversation_id, text,
+                                  AssistantCommand(action=AssistantIntent.update_entry),
+                                  'Не удалось проверить изменение записи. Ничего не изменено.',
+                                  AssistantStatus.no_action, [])
+        if details is None:
+            return None  # GigaChat failed; the offline adapter may use legacy parsing.
+        target = verify_search_query(details.target_phrase, text)
+        if details.target_phrase and target is None:
+            target = None
+        reference = details.reference_phrase is not None
+        command = AssistantCommand(action=AssistantIntent.update_entry, target_query=target)
+        if target is None and not reference:
+            return self._turn(conversation_id, text, command,
+                              'Уточните название записи, которую нужно изменить.',
+                              AssistantStatus.no_action, [])
+        if target is not None:
+            matches, exact = self._entries.find_candidates(target)
+        elif reference and state is not None and state.last_entry_id is not None:
+            entry = self._entries.get(state.last_entry_id)
+            matches, exact = ([entry] if entry is not None else []), True
+        else:
+            matches, exact = [], False
+        matches = [entry for entry in matches if entry.status != EntryStatus.completed
+                   and (route != TurnKind.stop_series or entry.recurrence is not None)]
+        priority = details.priority if details.value_phrase is not None else None
+        lead_minutes = details.lead_minutes if details.value_phrase is not None else None
+        if not matches:
+            return self._turn(conversation_id, text, command,
+                              'Не нашёл подходящую запись. Уточните её название.',
+                              AssistantStatus.no_action, [])
+        if len(matches) != 1 or not exact:
+            pending = command.model_copy(update={
+                'candidate_ids': [entry.id for entry in matches[:5]],
+                'confirm': f'special:{route.value}',
+                'priority': priority,
+                'remind_minutes': lead_minutes,
+            })
+            return self._turn(conversation_id, text, command,
+                              self._candidate_question(matches[:5], semantic=len(matches) == 1),
+                              AssistantStatus.needs_clarification, matches[:5], pending)
+        return self._apply_special_mutation(conversation_id, text, route, matches[0],
+                                            priority, lead_minutes)
+
+    def _apply_special_mutation(
+        self, conversation_id: uuid.UUID, text: str, route: TurnKind,
+        entry: Entry, priority: str | None, lead_minutes: int | None,
+    ) -> AssistantTurn:
+        command = AssistantCommand(action=AssistantIntent.update_entry)
+        if route == TurnKind.stop_series:
+            if entry.recurrence is None:
+                return self._turn(conversation_id, text, command,
+                                  f'«{entry.title}» не повторяется.', AssistantStatus.no_action, [entry])
+            updated = self._entries.update(entry.id, EntryUpdate(recurrence_until=self._today()))
+            answer = f'Готово: «{entry.title}» больше не повторяется после {phrasing.format_day(self._today(), self._today())}.'
+        elif route == TurnKind.set_priority:
+            if priority is None:
+                return self._turn(conversation_id, text, command,
+                                  'Уточните, сделать запись важной или обычной.',
+                                  AssistantStatus.no_action, [entry])
+            updated = self._entries.update(entry.id, EntryUpdate(priority=priority))
+            answer = f'Готово: «{entry.title}» — {"важное" if priority == "high" else "обычный приоритет"}.'
+        else:
+            if lead_minutes is None:
+                return self._turn(conversation_id, text, command,
+                                  'Уточните, за сколько времени до записи напомнить.',
+                                  AssistantStatus.no_action, [entry])
+            if entry.time is None:
+                return self._turn(conversation_id, text, command,
+                                  f'У записи «{entry.title}» нет времени. Сначала укажите его.',
+                                  AssistantStatus.no_action, [entry])
+            updated = self._entries.update(entry.id, EntryUpdate(remind_minutes=lead_minutes))
+            answer = f'Хорошо, напомню {phrasing.lead(lead_minutes)} до «{entry.title}».'
+        if updated is None:
+            return self._turn(conversation_id, text, command,
+                              'Запись больше не найдена.', AssistantStatus.no_action, [])
+        return self._turn(conversation_id, text, command, answer,
+                          AssistantStatus.completed, [updated], undo=self._undo('update', entry))
 
     def _find_one(self, what: str, state, *, recurring: bool = False) -> Entry | None:
         """One entry by name, or the entry the dialogue is about when the user says «её»."""
@@ -1012,14 +1257,25 @@ class AssistantService(QuickAnswers, UndoStack):
                           AssistantStatus.completed, [single], undo=self._undo('update', stored))
 
     def _on_confirm(self, conversation_id: uuid.UUID, text: str, timezone: str,
-                    previous: AssistantCommand) -> AssistantTurn | None:
+                    previous: AssistantCommand, *, model_first: bool = False) -> AssistantTurn | None:
         kind = previous.confirm
-        answer = yes_no(text)
+        answer = None if model_first else yes_no(text)
+        if model_first and kind != 'bulk_delete' and self._conversations is not None:
+            state = self._conversations.get(conversation_id)
+            history = ([{'role': item.role, 'text': item.text} for item in state.messages]
+                       if state else [])
+            question = next((item['text'] for item in reversed(history)
+                             if item['role'] == 'assistant'), '')
+            decision = self._dialogue.confirmation(
+                text, question, history=history, pending=previous, force_model=True,
+            )
+            answer = 'yes' if decision is True else 'no' if decision is False else None
         supplied_date = parse_date(text, self._today()) if kind in ('schedule', 'schedule_constraints') else None
         supplied_time = parse_time(text) if kind in ('schedule', 'schedule_constraints') else None
         supplied_period = parse_period(text, self._today()) if kind == 'schedule_constraints' else None
         supplied_daypart = parse_daypart(text) if kind == 'schedule_constraints' else None
-        if (kind != 'bulk_delete' and answer is None and supplied_date is None and supplied_time is None
+        if (not model_first and kind != 'bulk_delete' and answer is None
+                and supplied_date is None and supplied_time is None
                 and supplied_period is None and supplied_daypart is None
                 and self._conversations is not None):
             state = self._conversations.get(conversation_id)
@@ -1030,6 +1286,25 @@ class AssistantService(QuickAnswers, UndoStack):
                 text, question, history=history, pending=previous,
             )
             answer = 'yes' if decision is True else 'no' if decision is False else None
+        if answer is None and model_first and kind != 'bulk_delete':
+            answer = yes_no(text)
+        if kind == 'undo':
+            if answer == 'no':
+                return self._turn(conversation_id, text, previous,
+                                  'Хорошо, последнее действие оставлено без изменений.',
+                                  AssistantStatus.no_action, [])
+            if answer == 'yes':
+                stack = self._undo_stack(conversation_id)
+                record = stack[-1] if stack else None
+                fingerprint = self._undo_fingerprint(record) if record else None
+                if fingerprint is None or f'undo:{fingerprint}' not in (previous.forced or []):
+                    return self._turn(conversation_id, text, previous,
+                                      'Последнее действие изменилось. Повторите просьбу об откате.',
+                                      AssistantStatus.no_action, [])
+                return self._undo_last(conversation_id, text)
+            return self._turn(conversation_id, text, previous,
+                              'Подтвердите откат последнего действия или отмените его.',
+                              AssistantStatus.needs_clarification, [], previous)
         if kind == 'bulk_delete':
             # A reply can narrow the frozen set. A long affirmative phrase may also
             # name a subset, so only a short, unqualified answer confirms all.
@@ -1054,18 +1329,37 @@ class AssistantService(QuickAnswers, UndoStack):
                     except Exception:
                         logger.warning('Bulk selection classifier unavailable', exc_info=True)
             if answer == 'yes' or mode == 'confirm_all':
-                removed = []
+                removed = 0
+                undo_items = []
                 for entry_id in previous.candidate_ids or []:
+                    days = (previous.bulk_occurrences or {}).get(str(entry_id))
                     lookup = getattr(self._entries, 'get', None)
                     stored = lookup(entry_id) if callable(lookup) else None
-                    if self._entries.delete(entry_id):
-                        removed.append(stored)
-                removed_entries = [e for e in removed if e is not None]
+                    if days:
+                        if stored is None or stored.recurrence is None:
+                            continue
+                        skipped = set(stored.exdates or [])
+                        new_days = set(days) - skipped
+                        if new_days:
+                            if (stored.recurrence_until is not None and not (
+                                set(occurrences(stored.date, stored.recurrence, stored.date,
+                                                stored.recurrence_until,
+                                                stored.recurrence_interval or 1)) - skipped - new_days
+                            )):
+                                self._entries.delete(entry_id)
+                                undo_items.append(self._undo('delete', stored))
+                            else:
+                                self._entries.update(entry_id, EntryUpdate(exdates=sorted(skipped | new_days)))
+                                undo_items.append(self._undo('update', stored))
+                            removed += len(new_days)
+                    elif self._entries.delete(entry_id):
+                        removed += 1
+                        if stored is not None:
+                            undo_items.append(self._undo('delete', stored))
                 return self._turn(conversation_id, text, previous,
-                                  f'Удалено записей: {len(removed)}.'
-                                  + (' Передумали — скажите «Отмени последнее».' if removed_entries else ''),
-                                  AssistantStatus.completed, [],
-                                  undo=self._batch_undo('delete', removed_entries) if removed_entries else None)
+                                  f'Убрано событий: {removed}.', AssistantStatus.completed, [],
+                                  undo={'op': 'batch', 'items': undo_items} if undo_items else None)
+
             if mode == 'cancel':
                 return self._turn(conversation_id, text, previous,
                                   'Хорошо, записи оставлены без изменений.',
@@ -1274,6 +1568,40 @@ class AssistantService(QuickAnswers, UndoStack):
                       r'сентябр\w*|октябр\w*|ноябр\w*|декабр\w*|лучше|давай|тогда|пусть|будет|её|ее|его|'
                       r'перенеси|сдвинь|время|дату|дата)\b|\d+[:.]?\d*', ' ', text)
         return len([w for w in re.findall(r'[а-яёa-z]{3,}', rest.casefold())]) >= 1
+    @staticmethod
+    def _undo_fingerprint(record: dict) -> str:
+        return hashlib.sha256(json.dumps(record, sort_keys=True, ensure_ascii=False,
+                                          default=str).encode('utf-8')).hexdigest()
+
+    def _preview_undo(self, conversation_id: uuid.UUID, text: str) -> AssistantTurn:
+        stack = self._undo_stack(conversation_id)
+        record = stack[-1] if stack else None
+        command = AssistantCommand(action=AssistantIntent.unknown)
+        if not record:
+            return self._turn(conversation_id, text, command,
+                              'Отменять нечего: в этом диалоге я ещё ничего не менял.',
+                              AssistantStatus.no_action, [])
+        if record.get('op') == 'batch':
+            description = f'отменить пакет из {len(record.get("items", []))} изменений'
+        else:
+            saved = Entry.model_validate(record['entry'])
+            description = {
+            'create': f'удалить созданную запись «{saved.title}»',
+            'delete': f'вернуть удалённую запись «{saved.title}»',
+            'update': f'вернуть прежнее состояние записи «{saved.title}»',
+            }.get(record.get('op'))
+        if description is None:
+            return self._turn(conversation_id, text, command,
+                              'Не удалось определить последнее действие. Ничего не изменено.',
+                              AssistantStatus.no_action, [])
+        pending = command.model_copy(update={
+            'confirm': 'undo', 'forced': [f'undo:{self._undo_fingerprint(record)}'],
+        })
+        return self._turn(conversation_id, text, command,
+                          f'Подтвердите откат: {description}?',
+                          AssistantStatus.needs_clarification, [], pending)
+
+
 
     @staticmethod
     def _schedule_constraint_mismatches(command: AssistantCommand) -> tuple[bool, bool]:
@@ -1320,6 +1648,15 @@ class AssistantService(QuickAnswers, UndoStack):
         title = phrasing.capitalize(command.title)
         if command.recurrence is not None and command.date is None:
             command = command.model_copy(update={'date': first_date(command.recurrence, today)})
+        if (command.recurrence is not None and command.date == today and command.time is not None
+                and command.time < self._now().strftime('%H:%M')):
+            next_day = next_occurrence(command.date, command.recurrence, today)
+            if (next_day is None or command.recurrence_until is not None
+                    and next_day > command.recurrence_until):
+                return self._turn(conversation_id, text, command,
+                                  'Указанное время уже прошло, а других повторов в периоде нет.',
+                                  AssistantStatus.no_action, [])
+            command = command.model_copy(update={'date': next_day})
         if 'past' not in forced and command.recurrence is None:
             note = self._past_note(command.date, command.time)
             if note:
@@ -1327,11 +1664,47 @@ class AssistantService(QuickAnswers, UndoStack):
                 return self._turn(conversation_id, text, command,
                                   f'{note} Всё равно поставить на эту дату? Или назовите другую.',
                                   AssistantStatus.needs_clarification, [], pending)
+        series_days = []
+        existing_in_period = []
+        if command.recurrence is not None and command.date is not None and command.recurrence_until is not None:
+            series_days = occurrences(command.date, command.recurrence,
+                                      command.date, command.recurrence_until,
+                                      command.recurrence_interval or 1)
+            if len(series_days) > 366:
+                return self._turn(conversation_id, text, command,
+                                  'Период повторения слишком длинный. Укажите период до 366 повторов.',
+                                  AssistantStatus.no_action, [])
+            existing_in_period = self._entries.list_period(
+                command.date, command.recurrence_until, kind=command.kind,
+            )
+            normalized_title = ' '.join(title.casefold().split())
+            duplicate = next((entry for entry in existing_in_period
+                              if entry.status != EntryStatus.cancelled
+                              and entry.date in series_days and entry.time == command.time
+                              and ' '.join(entry.title.casefold().split()) == normalized_title), None)
+            if duplicate is not None:
+                return self._turn(
+                    conversation_id, text, command,
+                    f'На {phrasing.format_day(duplicate.date, today)} уже есть такая запись. '
+                    'Серия не создана: уточните период или время.',
+                    AssistantStatus.no_action, [duplicate],
+                )
         if 'conflict' not in forced:
-            clash = self._conflict(command.kind, command.date, command.time, command.duration_minutes)
+            clash = None
+            if series_days and command.kind == EntryKind.meeting and command.time is not None:
+                days = set(series_days)
+                clash = next((entry for entry in existing_in_period
+                              if entry.date in days and self._meeting_overlaps(
+                                  entry.date, command.time, command.duration_minutes, entry,
+                              )), None)
+            else:
+                clash = self._conflict(command.kind, command.date, command.time, command.duration_minutes)
             if clash is not None:
                 pending = command.model_copy(update={'confirm': 'conflict'})
                 return self._turn(conversation_id, text, command,
+                                  f'В один из дней повтора уже есть {phrasing.describe(clash, today)}. '
+                                  'Всё равно поставить всю серию? Или назовите другое время.'
+                                  if series_days else
                                   f'В это время уже есть {phrasing.describe(clash, today)}. '
                                   'Всё равно поставить? Или назовите другое время.',
                                   AssistantStatus.needs_clarification, [clash], pending)
@@ -1361,6 +1734,8 @@ class AssistantService(QuickAnswers, UndoStack):
 
     def _handle_at(
         self, text: str, timezone: str, conversation_id: uuid.UUID | None, today: datetime.date,
+        *, route: TurnKind | None = None, route_action: AssistantIntent | None = None,
+        route_checked: bool = False,
     ) -> AssistantTurn:
         if (conversation_id is not None and self._conversations is not None
                 and hasattr(self._conversations, 'is_foreign')
@@ -1368,12 +1743,22 @@ class AssistantService(QuickAnswers, UndoStack):
             conversation_id = None
         conversation_id = conversation_id or uuid.uuid4()
         state = self._conversations.get(conversation_id) if self._conversations else None
+        if not route_checked:
+            route, route_action, route_error = self._classify_turn(text, timezone, today, state)
+            if route_error is not None:
+                return self._turn(conversation_id, text,
+                                  AssistantCommand(action=AssistantIntent.unknown),
+                                  route_error, AssistantStatus.no_action, [])
+        if (state is not None and state.pending_command is not None
+                and route in (TurnKind.stop_series, TurnKind.set_priority, TurnKind.set_lead)):
+            _batch_interrupted.set(True)
+            state = dataclasses.replace(state, pending_command=None)
         if self._conversations is not None:
-            guarded, state = self._guard(conversation_id, text, timezone, state)
+            guarded, state = self._guard(conversation_id, text, timezone, state, route)
             if guarded is not None:
                 return guarded
-        state = self._refresh_summary(state)
-        plan = self._dialogue.plan(text, timezone, today, state)
+        plan = self._dialogue.plan(text, timezone, today, state, route=route)
+
         previous = plan.previous
         pending_step = plan.pending_step
         pending_reply = plan.reply
@@ -1383,6 +1768,13 @@ class AssistantService(QuickAnswers, UndoStack):
             _batch_interrupted.set(True)
         preextracted = plan.preextracted
         future_task = plan.task_fallback
+        if (previous is not None and pending_step == PendingStep.time_choice
+                and transition == DialogueTransition.repeat_question
+                and resolve_time_clarification(previous.time_phrase, text) is not None):
+            # The reply names one of the two offered hours. This is verified
+            # against the saved question, even if the model called it unclear.
+            pending_reply = PendingReply(act=ReplyAct.continue_command)
+            transition = DialogueTransition.continue_command
         if previous is not None and transition == DialogueTransition.cancel:
             turn = AssistantTurn(
                 conversation_id=conversation_id, turn_id=uuid.uuid4(),
@@ -1413,6 +1805,17 @@ class AssistantService(QuickAnswers, UndoStack):
                 )
             selected = choice.selected
             if selected is not None:
+                if previous.confirm and previous.confirm.startswith('special:'):
+                    try:
+                        special_route = TurnKind(previous.confirm.removeprefix('special:'))
+                    except ValueError:
+                        return self._turn(conversation_id, text, previous,
+                                          'Не удалось проверить изменение. Ничего не изменено.',
+                                          AssistantStatus.no_action, [])
+                    return self._apply_special_mutation(
+                        conversation_id, text, special_route, selected,
+                        previous.priority, previous.remind_minutes,
+                    )
                 selected_command = previous.model_copy(update={
                     'candidate_ids': None, 'selected_entry_id': selected.id,
                 })
@@ -1472,7 +1875,8 @@ class AssistantService(QuickAnswers, UndoStack):
                                                          semantic=len(candidates) == 1),
                 AssistantStatus.needs_clarification, candidates, pending_candidate,
             )
-        history = state.model_history() if state else []
+        history = self._model_history(state)
+
         resolved_time = None
         if previous is not None and pending_step == PendingStep.time_choice:
             options = ambiguous_time_options(previous.time_phrase)
@@ -1503,6 +1907,28 @@ class AssistantService(QuickAnswers, UndoStack):
         previous = resolved.previous
         explicit_target = resolved.explicit_target
         pronoun_reference = resolved.pronoun_reference
+        if route == TurnKind.command and route_action is not None and command.action != route_action:
+            return self._turn(
+                conversation_id, text, AssistantCommand(action=AssistantIntent.unknown),
+                'Разбор действия противоречит первому определению намерения. '
+                'Уточните запрос; записи не изменены.', AssistantStatus.no_action, [],
+            )
+        if (route == TurnKind.command and command.action == AssistantIntent.update_entry
+                and previous is None and not any((
+                    command.date, command.time, command.new_title,
+                    command.duration_minutes, command.shift_minutes,
+                ))):
+            classify_special = getattr(self._extractor, 'extract_special', None)
+            if callable(classify_special):
+                try:
+                    special = classify_special(text, None, history=history)
+                except Exception:
+                    logger.warning('Special operation review unavailable', exc_info=True)
+                    special = None
+                if special is not None and special.operation is not None:
+                    special_route = TurnKind(special.operation)
+                    return self._special_mutation(conversation_id, text, special_route,
+                                                  state, details=special)
         if command.action == AssistantIntent.create_entry and command.source_reference_phrase:
             source = (self._entries.get(state.last_entry_id)
                       if self._entries is not None and state is not None
@@ -1621,12 +2047,13 @@ class AssistantService(QuickAnswers, UndoStack):
                     local = datetime.datetime.combine(day, datetime.time.fromisoformat(when),
                                                       ZoneInfo('Europe/Moscow')).astimezone(ZoneInfo(timezone))
                     grounded.update({'date': local.date(), 'time': local.strftime('%H:%M'), 'time_unverified': None})
-            rule = find_recurrence(text)
+            rule = find_recurrence(text) or command.recurrence
             step = find_interval(text)
             if step is not None and step[0] != 'hours':
                 rule = step[0]
                 grounded['recurrence_interval'] = step[1]
             if rule is not None:
+
                 grounded['recurrence'] = rule
                 until = find_until(text, today)
                 if until is not None:
@@ -1655,6 +2082,45 @@ class AssistantService(QuickAnswers, UndoStack):
                         grounded['date'] = first_date(rule, today)
                 if command.time is None and parse_time(text):
                     grounded['time'] = parse_time(text)
+            explicit_until = find_until(text, today) if rule is not None else None
+            period = ((command.date or parse_date(text, today) or today, explicit_until)
+                      if explicit_until is not None else parse_period(text, today))
+            period = period if period is not None and period[0] != period[1] else None
+            if explicit_until is None and (period is not None or command.date_relation == DateRelation.period):
+                classify = getattr(self._extractor, 'extract_recurrence_window', None)
+                if callable(classify):
+                    try:
+                        proposed = classify(text, today)
+                    except Exception:
+                        logger.warning('Bounded recurrence extraction unavailable', exc_info=True)
+                    else:
+                        if proposed is not None:
+                            rule, period = proposed
+            if rule is not None and period is not None:
+                start = max(today, period[0])
+                anchor = command.date
+                if anchor is None and rule in (Recurrence.weekly, Recurrence.monthly):
+                    anchor = parse_date(text, today)
+                if anchor is not None and anchor > period[1]:
+                    days = []
+                else:
+                    days = occurrences(anchor or start, rule, start, period[1],
+                                       grounded.get('recurrence_interval') or command.recurrence_interval or 1)
+                if not days:
+                    return self._turn(
+                        conversation_id, text, command,
+                        'В указанном периоде больше нет дней для такого повтора. Назовите другой период.',
+                        AssistantStatus.no_action, [],
+                    )
+                grounded.update(date=days[0], recurrence=rule,
+                                recurrence_until=period[1],
+                                date_window_start=period[0], date_window_end=period[1])
+            elif rule is not None and command.date_relation == DateRelation.period:
+                return self._turn(
+                    conversation_id, text, command,
+                    'Не удалось надёжно определить период повтора. Уточните его границы.',
+                    AssistantStatus.no_action, [],
+                )
             delta = relative_minutes(text)
             if delta:
                 # «через полтора часа»: counted from now, not guessed by the model.
@@ -1750,6 +2216,7 @@ class AssistantService(QuickAnswers, UndoStack):
                         else [entry for entry in self._entries.all_entries()
                               if command.kind is None or entry.kind == command.kind])
                 result_entries = self._topic_entries(command.query, pool)
+
             else:
                 result_entries = self._entries.list_period(
                     command.date_from, command.date_to, kind=command.kind,

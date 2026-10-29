@@ -10,7 +10,7 @@ import EntryCard from './EntryCard.vue'
 import { useEditor } from '@/composables/useEditor'
 
 const chat = useChatStore()
-const { messages, sending, awaiting, retryLast } = storeToRefs(chat)
+const { messages, sending, awaiting, retryLast, reviewMode, reviewSummary } = storeToRefs(chat)
 const { voiceEnabled } = storeToRefs(useSessionStore())
 
 const draft = ref('')
@@ -105,6 +105,10 @@ watch(
 
 <template>
   <section class="panel chat" aria-label="Чат с ассистентом">
+    <div v-if="reviewMode" class="banner info">
+      {{ reviewSummary || 'Загружаю прогон CSV…' }} · Просмотр сохранённых ответов
+      <a class="link" href="/">Вернуться к своему чату</a>
+    </div>
     <div ref="listEl" class="messages" aria-live="polite">
       <div v-if="!messages.length" class="welcome">
         <div class="welcome-icon" aria-hidden="true">
@@ -132,13 +136,14 @@ watch(
               :entry="e"
               compact
               show-date
+              :readonly="reviewMode"
               @open="editor.edit"
             />
           </ul>
         </div>
       </div>
       </TransitionGroup>
-      <div v-if="suggestions.length" class="suggestions" aria-label="Быстрые ответы">
+      <div v-if="!reviewMode && suggestions.length" class="suggestions" aria-label="Быстрые ответы">
         <button v-for="s in suggestions" :key="s" type="button" class="chip" @click="pick(s)">{{ s }}</button>
       </div>
       <div v-if="sending" class="msg assistant">
@@ -146,23 +151,23 @@ watch(
       </div>
     </div>
 
-    <div v-if="retryLast && !sending" class="banner error">
+    <div v-if="!reviewMode && retryLast && !sending" class="banner error">
       Не удалось отправить.
       <button type="button" class="link" @click="chat.retry()">Повторить</button>
     </div>
     <div v-if="recError" class="banner error">{{ recError }}</div>
-    <div v-if="awaiting && !retryLast" class="banner info">
+    <div v-if="!reviewMode && awaiting && !retryLast" class="banner info">
       Ассистент ждёт ответа на уточнение.
       <button type="button" class="link" @click="chat.reset()">Начать заново</button>
     </div>
-    <div v-else-if="messages.length && !sending" class="toolbar">
+    <div v-else-if="!reviewMode && messages.length && !sending" class="toolbar">
       <button type="button" class="link muted" @click="chat.reset()">Очистить чат</button>
     </div>
     <div v-if="tooLong" class="banner error" role="alert">
       Сообщение слишком длинное: {{ draft.trim().length }} из {{ MAX_TEXT_LENGTH }} символов. Сократите его перед отправкой.
     </div>
 
-    <form class="composer" @submit.prevent="primary">
+    <form v-if="!reviewMode" class="composer" @submit.prevent="primary">
       <div class="field-pill" :class="{ recording: isRecording }">
         <template v-if="isRecording">
           <span class="rec-dot" aria-hidden="true" />

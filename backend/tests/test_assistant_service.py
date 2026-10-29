@@ -8,7 +8,7 @@ import pydantic
 
 from src.ports.conversations import ConversationState
 from src.schemas.assistant import (AssistantIntent, AssistantStatus, AssistantTurn,
-                                   ConversationMessage, Entry, EntryKind, EntryStatus)
+                                   ConversationMessage, Entry, EntryKind, EntryStatus, Recurrence)
 from src.schemas.assistant_command import AssistantCommand, BulkDeleteRequest
 from src.schemas.dialogue import (DialogueTransition, PendingReply, PendingStep,
                                   ReplyAct, transition_for_reply)
@@ -89,7 +89,9 @@ class FakeModelClient:
 
     def complete_json(self, system_prompt, user_prompt, json_schema):
         self.calls.append((system_prompt, user_prompt, json_schema))
-        if 'from_phrase' in json_schema.get('properties', {}) and 'scope' not in json_schema['properties']:
+        if ('from_phrase' in json_schema.get('properties', {})
+                and 'scope' not in json_schema['properties']
+                and 'recurrence' not in json_schema['properties']):
             return {'date_from': None, 'date_to': None,
                     'from_phrase': None, 'to_phrase': None}
         if isinstance(self.payload, list):
@@ -598,6 +600,74 @@ class AssistantServiceTests(unittest.TestCase):
         self.assertEqual(len(entries.items), 1)
         self.assertEqual(entries.items[0].title, 'Позже')
 
+    def test_clear_week_uses_grounded_model_period_and_requires_confirmation(self):
+        class WeekEntries(FakeEntries):
+            def __init__(self):
+                super().__init__()
+                self.items = [Entry(
+                    id=uuid.uuid4(), kind=EntryKind.task, title=f'Дело {day}',
+                    date=datetime.date(2026, 10, day), time=None,
+                    timezone='Europe/Moscow', status=EntryStatus.pending,
+                    created_at=datetime.datetime.now(datetime.timezone.utc),
+                ) for day in (20, 27)]
+
+            def list_period(self, start, end, *, kind=None):
+                return [entry for entry in self.items if start <= entry.date <= end]
+
+            def delete(self, entry_id):
+                before = len(self.items)
+                self.items = [entry for entry in self.items if entry.id != entry_id]
+                return len(self.items) < before
+
+        class WeekExtractor(FakeExtractor):
+            def classify_bulk_delete(self, text, today):
+                return ExternalCommandExtractor(FakeModelClient({
+                    'scope': 'bulk', 'date_from': '2026-10-19', 'date_to': '2026-10-25',
+                    'from_phrase': 'недели', 'to_phrase': 'недели',
+                })).classify_bulk_delete(text, today)
+
+        entries = WeekEntries()
+        service = AssistantService(WeekExtractor(AssistantCommand(action=AssistantIntent.unknown)),
+                                   entries, FakeConversations())
+        token = assistant_module._now.set(datetime.datetime(2026, 10, 20, 12, 0))
+        try:
+            preview = service.handle_message('очисти события недели', 'Europe/Moscow', None)
+            self.assertEqual(preview.status, AssistantStatus.needs_clarification)
+            self.assertEqual([entry.title for entry in preview.entries], ['Дело 20'])
+            self.assertEqual(len(entries.items), 2)
+            result = service.handle_message('подтверждаю', 'Europe/Moscow', preview.conversation_id)
+        finally:
+            assistant_module._now.reset(token)
+        self.assertEqual(result.status, AssistantStatus.completed)
+        self.assertEqual([entry.title for entry in entries.items], ['Дело 27'])
+
+    def test_bounded_recurrence_requires_quoted_rule_and_valid_period(self):
+        text = 'На этой неделе каждый день гулять с собакой в шесть вечера'
+        payload = {
+            'recurrence': 'daily', 'recurrence_phrase': 'каждый день',
+            'date_from': '2026-10-19', 'date_to': '2026-10-25',
+            'from_phrase': 'этой неделе', 'to_phrase': 'этой неделе',
+        }
+        client = FakeModelClient(payload)
+        extractor = ExternalCommandExtractor(client)
+        self.assertEqual(extractor.extract_recurrence_window(
+            text, datetime.date(2026, 10, 20),
+        ), (Recurrence.daily, (datetime.date(2026, 10, 19), datetime.date(2026, 10, 25))))
+        client.payload = {**payload, 'recurrence_phrase': 'каждую пятницу'}
+        with self.assertRaises(InvalidModelResponseError):
+            extractor.extract_recurrence_window(text, datetime.date(2026, 10, 20))
+        client.payload = {**payload, 'date_to': '2026-11-01'}
+        with self.assertRaises(InvalidModelResponseError):
+            extractor.extract_recurrence_window(text, datetime.date(2026, 10, 20))
+        client.payload = {**payload, 'recurrence': 'weekly'}
+        with self.assertRaises(InvalidModelResponseError):
+            extractor.extract_recurrence_window(text, datetime.date(2026, 10, 20))
+        client.payload = {**payload, 'recurrence_phrase': 'этой неделе'}
+        with self.assertRaises(InvalidModelResponseError):
+            extractor.extract_recurrence_window(
+                'На этой неделе встреча с командой', datetime.date(2026, 10, 20),
+            )
+
     def test_period_scoped_generic_delete_is_bulk_without_the_word_all(self):
         today = datetime.date(2026, 10, 18)
         for text in ('удали события за этот месяц', 'отмени встречи за следующую неделю',
@@ -627,7 +697,7 @@ class AssistantServiceTests(unittest.TestCase):
         finally:
             assistant_module._now.reset(token)
         self.assertEqual(turn.status, AssistantStatus.needs_clarification)
-        self.assertIn('Удалить 1 запись за период', turn.assistant_text)
+        self.assertIn('Удалить 1 событие за период', turn.assistant_text)
 
     def test_bulk_delete_can_narrow_friday_entries_by_names_before_confirmation(self):
         class StoredEntries(FakeEntries):
@@ -863,16 +933,16 @@ class AssistantServiceTests(unittest.TestCase):
     def test_model_split_accepts_only_excerpts_and_carries_creation_action(self):
         text = 'Создай собеседование на среду и созвон с коллегой в четверг'
         client = FakeModelClient({'parts': [
-            {'text': 'Создай собеседование на среду', 'inherit_action': False},
-            {'text': 'созвон с коллегой в четверг', 'inherit_action': True},
+            {'start_token': 0, 'end_token': 3, 'inherit_action': False},
+            {'start_token': 5, 'end_token': 9, 'inherit_action': True},
         ]})
         extractor = ExternalCommandExtractor(client)
         self.assertEqual(extractor.split_create_requests(text), [
             'Создай собеседование на среду', 'Создай созвон с коллегой в четверг',
         ])
         client.payload = {'parts': [
-            {'text': 'Создай собеседование на среду', 'inherit_action': False},
-            {'text': 'созвон с другом в четверг', 'inherit_action': True},
+            {'start_token': 0, 'end_token': 3, 'inherit_action': False},
+            {'start_token': 5, 'end_token': 10, 'inherit_action': True},
         ]}
         self.assertEqual(extractor.split_create_requests(text), [text])
 
@@ -880,19 +950,22 @@ class AssistantServiceTests(unittest.TestCase):
         text = ('Привет поставь мне созвон с коллегой на субботу в 9 утра, '
                 'а в воскресенье в 8 вечера надо покормить черепаху')
         client = FakeModelClient({'parts': [
-            {'text': 'Привет поставь мне созвон с коллегой на субботу в 9 утра',
-             'inherit_action': False},
-            {'text': 'в воскресенье в 8 вечера надо покормить черепаху',
-             'inherit_action': False},
+            {'start_token': 0, 'end_token': 10, 'inherit_action': False},
+            {'start_token': 12, 'end_token': 19, 'inherit_action': False},
         ]})
         extractor = ExternalCommandExtractor(client)
         self.assertEqual(extractor.split_create_requests(text), [
             'Привет поставь мне созвон с коллегой на субботу в 9 утра',
             'в воскресенье в 8 вечера надо покормить черепаху',
         ])
-        client.payload['parts'][0]['text'] = 'поставь мне созвон с коллегой на субботу в 9 утра'
+        client.payload['parts'][0]['start_token'] = 1
         self.assertEqual(extractor.split_create_requests(text)[0],
                          'Привет поставь мне созвон с коллегой на субботу в 9 утра')
+        # The service strips the greeting before it asks for token offsets.
+        client.payload['parts'] = [
+            {'start_token': 0, 'end_token': 9, 'inherit_action': False},
+            {'start_token': 11, 'end_token': 18, 'inherit_action': False},
+        ]
 
         class SplitExtractor(FakeExtractor):
             def split_create_requests(self, request):
@@ -1113,7 +1186,7 @@ class AssistantServiceTests(unittest.TestCase):
         self.assertEqual(
             set(AssistantCommand.provider_schema()['required']),
             set(AssistantCommand.model_fields) - {
-                'candidate_ids', 'remaining_requests', 'selected_entry_id', 'move_intent', 'pending_step',
+                'candidate_ids', 'bulk_occurrences', 'remaining_requests', 'selected_entry_id', 'move_intent', 'pending_step',
                 'signals_verified', 'date_unverified', 'time_unverified',
                 'date_window_start', 'date_window_end', 'preferred_daypart',
                 'recurrence', 'confirm', 'confirm_entry_id', 'forced', 'shift_minutes',

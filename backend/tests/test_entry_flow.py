@@ -390,6 +390,26 @@ class EntryFlowTests(unittest.TestCase):
         )
         self.assertEqual([entry.title for entry in turn.entries], ['Поход к врачу'])
 
+    def test_literal_topic_match_survives_model_false_negative(self):
+        class RelevanceExtractor(FakeExtractor):
+            def classify_relevant_entries(self, query, candidates):
+                self.assertEqual(candidates, [])
+                return []
+
+        repository = FakeRepository()
+        entries = EntryService(repository)
+        expected = entries.create(
+            kind=EntryKind.task, title='Проверить сроки по хакатону',
+            date=datetime.date(2026, 10, 30), time='12:30', timezone='Europe/Moscow',
+        )
+        extractor = RelevanceExtractor(AssistantCommand(
+            action=AssistantIntent.search_entries, kind=EntryKind.task, query='хакатон',
+        ))
+        turn = AssistantService(extractor, entries, FakeConversations()).handle_message(
+            'Покажи задачи по хакатону', 'Europe/Moscow', None,
+        )
+        self.assertEqual([entry.id for entry in turn.entries], [expected.id])
+
     def test_schedule_clarification_cannot_mutate_another_entry(self):
         today = datetime.datetime.now(ZoneInfo('Europe/Moscow')).date()
         repository = FakeRepository()
@@ -512,6 +532,24 @@ class EntryFlowTests(unittest.TestCase):
         self.assertEqual(done.status, AssistantStatus.completed)
         self.assertEqual(done.entries[0].time, '17:00')
         self.assertEqual(done.entries[0].date, today + datetime.timedelta(days=1))
+
+    def test_time_choice_clears_unverified_time_after_grounded_reply(self):
+        today = datetime.datetime.now(ZoneInfo('Europe/Moscow')).date()
+        repository = FakeRepository()
+        conversations = FakeConversations()
+        extractor = ReplyExtractor(AssistantCommand.model_validate({
+            'action': 'create_entry', 'kind': 'meeting', 'title': 'Встреча с Иваном',
+            'date': (today + datetime.timedelta(days=3)).isoformat(),
+            'time_phrase': 'в 7', 'time_unverified': True,
+        }), [PendingReply(act=ReplyAct.unclear)])
+        service = AssistantService(extractor, EntryService(repository), conversations)
+        question = service.handle_message('Встреча с Иваном через три дня в 7',
+                                          'Europe/Moscow', None)
+        self.assertIn('07:00 или 19:00', question.assistant_text)
+        done = service.handle_message('утра', 'Europe/Moscow', question.conversation_id)
+        self.assertEqual(done.status, AssistantStatus.completed)
+        self.assertEqual(done.entries[0].time, '07:00')
+        self.assertIsNone(conversations.get(done.conversation_id).pending_command)
 
     def test_time_choice_can_update_date_with_period_reply(self):
         today = datetime.datetime.now(ZoneInfo('Europe/Moscow')).date()

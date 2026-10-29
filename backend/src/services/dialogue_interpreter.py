@@ -11,6 +11,7 @@ from src.schemas.assistant import AssistantIntent, Entry, EntryKind
 from src.schemas.assistant_command import AssistantCommand
 from src.schemas.dialogue import (DialogueTransition, PendingReply, PendingStep,
                                   ReplyAct, ScheduleRole, transition_for_reply)
+from src.services.command_extractor import TurnKind
 from src.services.entries import EntryService
 from src.services.selection import selection_is_grounded
 from src.services.temporal import (ambiguous_time_options, parse_date, parse_period,
@@ -80,12 +81,13 @@ class DialogueInterpreter:
         self, text: str, proposal: str, *,
         history: list[dict[str, str]] | None = None,
         pending: AssistantCommand | None = None,
+        force_model: bool = False,
     ) -> bool | None:
-        if len(text) > 160 or len(text.split()) > 16 or re.search(
+        if not force_model and (len(text) > 160 or len(text.split()) > 16 or re.search(
             r'\b(?:создай|создать|добавь|добавить|удали|удалить|перенеси|'
             r'перенести|измени|изменить|покажи|найди|отметь)\b',
             text.casefold(),
-        ):
+        )):
             return None
         classify = getattr(self._extractor, 'classify_confirmation', None)
         if not callable(classify):
@@ -106,8 +108,10 @@ class DialogueInterpreter:
         self, text: str, proposal: str, *,
         history: list[dict[str, str]] | None = None,
         pending: AssistantCommand | None = None,
+        force_model: bool = False,
     ) -> bool | None:
-        return self._model_confirmation(text, proposal, history=history, pending=pending)
+        return self._model_confirmation(text, proposal, history=history, pending=pending,
+                                        force_model=force_model)
 
     @classmethod
     def _grounded_candidate(
@@ -297,14 +301,20 @@ class DialogueInterpreter:
     def plan(
         self, text: str, timezone: str, today: datetime.date,
         state: ConversationState | None,
+        *, route: TurnKind | None = None,
     ) -> DialoguePlan:
         previous = state.pending_command if state else None
         history = state.model_history() if state else []
         step = self.pending_step(previous) if previous is not None else None
-        reply = self._classify(text, previous, state, today) if previous is not None else None
+        if previous is None:
+            reply = None
+        elif route not in (None, TurnKind.pending_reply):
+            reply = PendingReply(act=ReplyAct.new_command)
+        else:
+            reply = self._classify(text, previous, state, today)
         transition = transition_for_reply(step, reply.act) if reply is not None else None
         preextracted = None
-        task_fallback = self._task_fallback(text, today)
+        task_fallback = self._task_fallback(text, today) if route is None else None
         independent = None
 
         if previous is not None and reply is not None and reply.act == ReplyAct.new_command:
@@ -312,7 +322,7 @@ class DialogueInterpreter:
                 independent = self._extractor.extract(
                     text=text, timezone=timezone, today=today, previous=None, history=history,
                 )
-                if (independent.action == AssistantIntent.create_entry
+                if (route is None and independent.action == AssistantIntent.create_entry
                         and not self._independent_command(independent, previous)):
                     reply = PendingReply(act=ReplyAct.unclear)
                     transition = DialogueTransition.repeat_question
@@ -380,7 +390,7 @@ class DialogueInterpreter:
                     r'поставь|покажи|найди|поищи)\b', text.casefold(),
                 ):
                     transition = DialogueTransition.new_command
-            if task_fallback is not None and previous.kind != EntryKind.task:
+            if route is None and task_fallback is not None and previous.kind != EntryKind.task:
                 transition = DialogueTransition.new_command
                 preextracted = task_fallback
             if transition == DialogueTransition.new_command:

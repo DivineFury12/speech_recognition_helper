@@ -30,6 +30,34 @@ def tearDownModule():
 
 
 class RulesTests(unittest.TestCase):
+    def test_rules_only_command_is_not_marked_as_model_verified(self):
+        command = ExternalCommandExtractor(RulesModel()).extract(
+            'Создай задачу купить хлеб', TZ, TODAY,
+        )
+        self.assertFalse(command.signals_verified)
+
+    def test_later_success_does_not_verify_fallback_intent(self):
+        class FailsFirst:
+            calls = 0
+
+            def complete_json(self, system_prompt, user_prompt, json_schema):
+                self.calls += 1
+                if self.calls == 1:
+                    raise RuntimeError('нет сети')
+                return {name: None for name in json_schema['properties']}
+
+            def close(self):
+                pass
+
+        primary = FailsFirst()
+        model = FallbackModel(primary)
+        command = ExternalCommandExtractor(model, temporal_retry=True).extract(
+            'Создай задачу купить хлеб', TZ, TODAY,
+        )
+        self.assertEqual(primary.calls, 2)
+        self.assertTrue(model.healthy)
+        self.assertFalse(command.signals_verified)
+
     def chat(self, model=None):
         self.repository = RecurringRepository()
         service = AssistantService(ExternalCommandExtractor(model or RulesModel()),

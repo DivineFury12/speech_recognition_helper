@@ -106,7 +106,8 @@ class BulkTests(unittest.TestCase):
         turn = chat('Отметь все дела на сегодня выполненными')
         self.assertIn('2 записи', turn.assistant_text)
         self.assertIn('Встречи не трогал', turn.assistant_text)
-        chat('Отмени последнее')
+        self.assertEqual(chat('Отмени последнее').status, AssistantStatus.needs_clarification)
+        chat('да')
         self.assertTrue(all(e.status == EntryStatus.pending for e in chat.repository.items))
 
     def test_move_all_and_undo(self):
@@ -117,7 +118,8 @@ class BulkTests(unittest.TestCase):
         turn = chat('Перенеси все встречи с завтра на понедельник')
         self.assertIn('Перенёс 2', turn.assistant_text)
         self.assertEqual({e.date for e in chat.repository.items}, {monday})
-        self.assertIn('2 записи', chat('Отмени последнее').assistant_text)
+        self.assertEqual(chat('Отмени последнее').status, AssistantStatus.needs_clarification)
+        self.assertIn('2 записи', chat('да').assistant_text)
         self.assertEqual({e.date for e in chat.repository.items}, {TOMORROW})
 
     def test_undo_walks_back_step_by_step(self):
@@ -130,8 +132,10 @@ class BulkTests(unittest.TestCase):
         ])
         chat('Поставь задачу купить хлеб завтра')
         chat('Поставь задачу купить молоко завтра')
-        chat('Отмени последнее')
-        chat('Отмени последнее')
+        self.assertEqual(chat('Отмени последнее').status, AssistantStatus.needs_clarification)
+        chat('да')
+        self.assertEqual(chat('Отмени последнее').status, AssistantStatus.needs_clarification)
+        chat('да')
         self.assertEqual(chat.repository.items, [])
 
 

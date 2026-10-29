@@ -145,6 +145,8 @@ def create_app(settings: src.settings.Settings | None = None) -> fastapi.FastAPI
             app.state.assistant_service = src.services.assistant.AssistantService(
                 src.services.command_extractor.ExternalCommandExtractor(
                     gigachat_client, temporal_retry=bool(config.gigachat_auth_key),
+                    intent_review=bool(config.gigachat_auth_key),
+                    semantic_routing=bool(config.gigachat_auth_key),
                 ),
                 app.state.entries_service,
                 app.state.conversations,

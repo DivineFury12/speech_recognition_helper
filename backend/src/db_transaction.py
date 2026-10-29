@@ -4,7 +4,7 @@ import contextlib
 import contextvars
 from collections.abc import Iterator
 
-from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.orm import Session, SessionTransaction, sessionmaker
 
 
 _active_session: contextvars.ContextVar[Session | None] = contextvars.ContextVar(
@@ -19,6 +19,17 @@ def use_session(session: Session) -> Iterator[None]:
         yield
     finally:
         _active_session.reset(token)
+
+
+@contextlib.contextmanager
+def request_savepoint() -> Iterator[SessionTransaction | None]:
+    """Nest an all-or-nothing operation inside the active assistant request."""
+    active = _active_session.get()
+    if active is None:
+        yield None
+    else:
+        with active.begin_nested() as nested:
+            yield nested
 
 
 @contextlib.contextmanager

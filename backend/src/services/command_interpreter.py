@@ -212,7 +212,9 @@ class CommandInterpreter:
         if previous is not None:
             command = self._merge(previous, command)
         if resolved_time:
-            command = command.model_copy(update={'time_phrase': None})
+            command = command.model_copy(update={
+                'time_phrase': None, 'time_unverified': False,
+            })
         if command.action == AssistantIntent.update_entry and move_requested:
             command = command.model_copy(update={'move_intent': True})
         if command.action == AssistantIntent.update_entry and command.duration_minutes is None:

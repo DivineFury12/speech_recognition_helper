@@ -20,6 +20,7 @@ export interface ChatMessage {
 const SUMMARY_KEY = 'assistant-summary-day'
 
 const STORAGE_KEY = 'assistant-chat-v2'
+const CSV_REVIEW = new URLSearchParams(window.location.search).get('review') === 'csv'
 const MAX_STORED = 100
 const MAX_TEXT_LENGTH = 1000
 
@@ -50,8 +51,10 @@ let seq = 0
 const localId = () => `local-${Date.now()}-${++seq}`
 
 export const useChatStore = defineStore('chat', () => {
-  const initial = load()
+  const initial = CSV_REVIEW ? { messages: [] as ChatMessage[], conversationId: null, awaiting: false } : load()
   const messages = ref<ChatMessage[]>(initial.messages)
+  const reviewMode = ref(CSV_REVIEW)
+  const reviewSummary = ref('')
   const sending = ref(false)
   const conversationId = ref<string | null>(initial.conversationId)
   const awaiting = ref(initial.awaiting)
@@ -60,6 +63,7 @@ export const useChatStore = defineStore('chat', () => {
   watch(
     [messages, conversationId, awaiting],
     () => {
+      if (reviewMode.value) return
       try {
         const data: Persisted = {
           messages: messages.value.slice(-MAX_STORED),
@@ -71,6 +75,27 @@ export const useChatStore = defineStore('chat', () => {
     },
     { deep: true },
   )
+
+  if (reviewMode.value) {
+    void fetch('/csv-review.json', { cache: 'no-store' })
+      .then(async (response) => {
+        if (!response.ok) throw new Error(`Не удалось загрузить прогон: HTTP ${response.status}`)
+        return response.json() as Promise<{
+          messages: ChatMessage[]
+          runs: { passed: boolean }[]
+        }>
+      })
+      .then((report) => {
+        if (!Array.isArray(report.messages) || !Array.isArray(report.runs)) {
+          throw new Error('Файл прогона имеет неверный формат')
+        }
+        messages.value = report.messages
+        reviewSummary.value = `CSV: ${report.runs.filter((run) => run.passed).length} из ${report.runs.length} явных команд создания задач совпали по полям`
+      })
+      .catch((error: unknown) => {
+        messages.value = [{ id: 'csv-review-error', role: 'error', text: error instanceof Error ? error.message : 'Не удалось загрузить прогон' }]
+      })
+  }
 
   async function run(
     user: Pick<ChatMessage, 'text' | 'voice'>,
@@ -131,6 +156,7 @@ export const useChatStore = defineStore('chat', () => {
   }
 
   function sendText(text: string) {
+    if (reviewMode.value) return
     const t = text.trim()
     if (!t || sending.value) return
     if (t.length > MAX_TEXT_LENGTH) {
@@ -145,6 +171,7 @@ export const useChatStore = defineStore('chat', () => {
   }
 
   function sendAudio(file: Blob, filename: string) {
+    if (reviewMode.value) return
     if (sending.value) return
     const request_id = crypto.randomUUID()
     return run(
@@ -154,6 +181,7 @@ export const useChatStore = defineStore('chat', () => {
   }
 
   async function showDailySummary() {
+    if (reviewMode.value) return
     const day = isoDate(new Date())
     try {
       if (localStorage.getItem(SUMMARY_KEY) === day) return
@@ -181,11 +209,12 @@ export const useChatStore = defineStore('chat', () => {
   }
 
   function reset() {
+    if (reviewMode.value) return
     messages.value = []
     conversationId.value = null
     awaiting.value = false
     retryLast.value = null
   }
 
-  return { messages, sending, conversationId, awaiting, retryLast, sendText, sendAudio, retry, reset, showDailySummary }
+  return { messages, sending, conversationId, awaiting, retryLast, reviewMode, reviewSummary, sendText, sendAudio, retry, reset, showDailySummary }
 })

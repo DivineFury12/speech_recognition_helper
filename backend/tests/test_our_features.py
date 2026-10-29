@@ -226,23 +226,173 @@ class UndoTests(unittest.TestCase):
         ])
         created = chat('Поставь встречу с Иваном завтра в 15:00')
         self.assertEqual(created.suggestions, ['Отмени последнее'])
-        self.assertIn('Отменил', chat('Отмени последнее').assistant_text)
+        self.assertEqual(chat('Отмени последнее').status, AssistantStatus.needs_clarification)
+        self.assertIn('Отменил', chat('да').assistant_text)
         self.assertEqual(chat.repository.items, [])
         chat('Поставь встречу с Иваном завтра в 15:00')
         moved = chat('Перенеси её на 16:00')
         self.assertEqual(moved.entries[0].time, '16:00')
-        self.assertEqual(chat('Верни как было').entries[0].time, '15:00')
+        self.assertEqual(chat('Верни как было').status, AssistantStatus.needs_clarification)
+        self.assertEqual(chat('да').entries[0].time, '15:00')
         chat('Удали встречу с Иваном')
         chat('да')
         self.assertEqual(chat.repository.items, [])
-        back = chat('Отмени последнее')
+        self.assertEqual(chat('Отмени последнее').status, AssistantStatus.needs_clarification)
+        back = chat('да')
         self.assertEqual(back.entries[0].title, 'Встреча с Иваном')
-        self.assertIn('Отменил', chat('Отмени последнее').assistant_text)
+        self.assertEqual(chat('Отмени последнее').status, AssistantStatus.needs_clarification)
+        self.assertIn('Отменил', chat('да').assistant_text)
         self.assertEqual(chat.repository.items, [])
         self.assertIn('нечего', chat('Отмени последнее').assistant_text)
 
 
 class RecurrenceAndConflictTests(unittest.TestCase):
+    def test_daily_reminder_is_bounded_by_current_week(self):
+        chat = Chat([command(
+            action='create_entry', kind='reminder', title='гулять с собакой',
+            date_phrase='на этой неделе', date_relation='period',
+            time='18:00', time_phrase='в шесть вечера',
+        )])
+        token = assistant_module._now.set(datetime.datetime(2026, 10, 20, 12, 0))
+        try:
+            created = chat('На этой неделе каждый день гулять с собакой в шесть вечера')
+            self.assertEqual(created.status, AssistantStatus.completed)
+            saved = created.entries[0]
+            self.assertEqual(saved.date, datetime.date(2026, 10, 20))
+            self.assertEqual(saved.recurrence, Recurrence.daily)
+            self.assertEqual(saved.recurrence_until, datetime.date(2026, 10, 25))
+            days = [entry.date for entry in chat.entries.list_period(
+                datetime.date(2026, 10, 19), datetime.date(2026, 10, 27),
+            )]
+        finally:
+            assistant_module._now.reset(token)
+        self.assertEqual(days, [datetime.date(2026, 10, day) for day in range(20, 26)])
+
+    def test_model_can_recognize_bounded_repeat_without_literal_every_day(self):
+        class WindowExtractor(FakeExtractor):
+            def extract_recurrence_window(self, text, today):
+                return Recurrence.daily, (
+                    datetime.date(2026, 10, 19), datetime.date(2026, 10, 25),
+                )
+
+        chat = Chat([command(
+            action='create_entry', kind='task', title='гулять с собакой',
+            date_phrase='на этой неделе', date_relation='period',
+            time='18:00', time_phrase='в шесть вечера',
+        )])
+        chat.service._extractor = WindowExtractor(chat.service._extractor.command)
+        token = assistant_module._now.set(datetime.datetime(2026, 10, 20, 12, 0))
+        try:
+            created = chat('Все дни на этой неделе буду гулять с собакой в шесть вечера')
+        finally:
+            assistant_module._now.reset(token)
+        self.assertEqual(created.status, AssistantStatus.completed)
+        self.assertEqual(created.entries[0].recurrence, Recurrence.daily)
+        self.assertEqual(created.entries[0].recurrence_until, datetime.date(2026, 10, 25))
+
+    def test_passed_weekday_inside_bounded_week_does_not_shift_series(self):
+        chat = Chat([command(
+            action='create_entry', kind='task', title='планёрка',
+            date_phrase='каждый понедельник', date_relation='exact',
+        )])
+        token = assistant_module._now.set(datetime.datetime(2026, 10, 20, 12, 0))
+        try:
+            result = chat('Планёрка каждый понедельник на этой неделе')
+        finally:
+            assistant_module._now.reset(token)
+        self.assertEqual(result.status, AssistantStatus.no_action)
+        self.assertEqual(chat.repository.items, [])
+
+    def test_bounded_repeat_checks_duplicates_on_later_days(self):
+        chat = Chat([command(
+            action='create_entry', kind='reminder', title='гулять с собакой',
+            date_phrase='на этой неделе', date_relation='period',
+            time='18:00', time_phrase='в 18:00',
+        )])
+        chat.entries.create(kind=EntryKind.reminder, title='Гулять с собакой',
+                            date=datetime.date(2026, 10, 22), time='18:00', timezone=TZ)
+        token = assistant_module._now.set(datetime.datetime(2026, 10, 20, 12, 0))
+        try:
+            result = chat('Каждый день на этой неделе гулять с собакой в 18:00')
+        finally:
+            assistant_module._now.reset(token)
+        self.assertEqual(result.status, AssistantStatus.no_action)
+        self.assertIn('уже есть такая запись', result.assistant_text)
+        self.assertEqual(len(chat.repository.items), 1)
+
+    def test_bounded_meeting_checks_conflict_on_later_days(self):
+        chat = Chat([command(
+            action='create_entry', kind='meeting', title='планёрка',
+            date_phrase='на этой неделе', date_relation='period',
+            time='18:00', time_phrase='в 18:00',
+        )])
+        chat.entries.create(kind=EntryKind.meeting, title='Другая встреча',
+                            date=datetime.date(2026, 10, 22), time='18:00', timezone=TZ)
+        token = assistant_module._now.set(datetime.datetime(2026, 10, 20, 12, 0))
+        try:
+            result = chat('Каждый день на этой неделе планёрка в 18:00')
+        finally:
+            assistant_module._now.reset(token)
+        self.assertEqual(result.status, AssistantStatus.needs_clarification)
+        self.assertIn('В один из дней повтора', result.assistant_text)
+        self.assertEqual(len(chat.repository.items), 1)
+
+    def test_single_meeting_this_week_does_not_become_daily(self):
+        chat = Chat([command(
+            action='create_entry', kind='meeting', title='встреча с командой',
+            date_phrase='на этой неделе', date_relation='period',
+            time='18:00', time_phrase='в шесть вечера',
+        )])
+        asked = chat('На этой неделе встреча с командой в шесть вечера')
+        self.assertEqual(asked.status, AssistantStatus.needs_clarification)
+        self.assertEqual(chat.repository.items, [])
+
+    def test_clear_week_skips_only_occurrences_inside_week(self):
+        chat = Chat([command(action='unknown')])
+        token = assistant_module._now.set(datetime.datetime(2026, 10, 20, 12, 0))
+        try:
+            saved = chat.entries.create(
+                kind=EntryKind.task, title='Выгулять собаку',
+                date=datetime.date(2026, 10, 19), time='18:00', timezone=TZ,
+                recurrence=Recurrence.daily,
+                recurrence_until=datetime.date(2026, 11, 1),
+            )
+            preview = chat('очисти события этой недели')
+            self.assertEqual(preview.status, AssistantStatus.needs_clarification)
+            self.assertIn('Повторы за пределами периода останутся', preview.assistant_text)
+            self.assertEqual(chat.repository.get(saved.id).exdates, None)
+            confirmed = chat('подтверждаю')
+            self.assertEqual(confirmed.status, AssistantStatus.completed)
+            self.assertIsNotNone(chat.repository.get(saved.id))
+            this_week = chat.entries.list_period(
+                datetime.date(2026, 10, 19), datetime.date(2026, 10, 25),
+            )
+            next_week = chat.entries.list_period(
+                datetime.date(2026, 10, 26), datetime.date(2026, 11, 1),
+            )
+        finally:
+            assistant_module._now.reset(token)
+        self.assertEqual(this_week, [])
+        self.assertEqual(len(next_week), 7)
+
+    def test_clear_week_removes_series_if_all_its_occurrences_are_selected(self):
+        chat = Chat([command(action='unknown')])
+        token = assistant_module._now.set(datetime.datetime(2026, 10, 20, 12, 0))
+        try:
+            chat.entries.create(
+                kind=EntryKind.task, title='Выгулять собаку',
+                date=datetime.date(2026, 10, 20), time='18:00', timezone=TZ,
+                recurrence=Recurrence.daily,
+                recurrence_until=datetime.date(2026, 10, 25),
+            )
+            preview = chat('очисти события этой недели')
+            self.assertEqual(preview.status, AssistantStatus.needs_clarification)
+            self.assertEqual(len(chat.repository.items), 1)
+            self.assertEqual(chat('подтверждаю').status, AssistantStatus.completed)
+            self.assertEqual(chat.repository.items, [])
+        finally:
+            assistant_module._now.reset(token)
+
     def test_weekly_entry_repeats_and_completion_moves_forward(self):
         monday = TODAY + datetime.timedelta(days=(7 - TODAY.weekday()) % 7 or 7)
         chat = Chat([

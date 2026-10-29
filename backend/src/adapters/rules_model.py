@@ -13,7 +13,8 @@ import re
 from src.schemas.assistant_command import AssistantCommand
 from src.services.entries import EntryService
 from src.services.guards import yes_no
-from src.services.temporal import ambiguous_time_phrase, parse_date, parse_target_date, parse_time
+from src.services.recurrence import find_recurrence
+from src.services.temporal import ambiguous_time_phrase, parse_date, parse_period, parse_target_date, parse_time
 
 logger = logging.getLogger(__name__)
 
@@ -144,6 +145,7 @@ class RulesModel:
     """Same interface as GigaChatClient.complete_json, answered by rules."""
 
     name = 'rules'
+    healthy = False
 
     def complete_json(self, system_prompt: str, user_prompt: str, json_schema: dict) -> dict:
         data = json.loads(user_prompt)
@@ -164,6 +166,16 @@ class RulesModel:
         if 'act' in properties:
             return _reply_act(data.get('reply', ''))
         today = datetime.date.fromisoformat(data.get('today') or datetime.date.today().isoformat())
+        if 'recurrence_phrase' in properties:
+            text = data.get('text', '')
+            rule = find_recurrence(text)
+            period = parse_period(text, today)
+            if rule is None or period is None or period[0] == period[1]:
+                return dict(recurrence=None, recurrence_phrase=None, date_from=None,
+                            date_to=None, from_phrase=None, to_phrase=None)
+            return dict(recurrence=rule.value, recurrence_phrase=text,
+                        date_from=period[0].isoformat(), date_to=period[1].isoformat(),
+                        from_phrase=text, to_phrase=text)
         return command_from_rules(data.get('text', ''), today)
 
     def close(self) -> None:

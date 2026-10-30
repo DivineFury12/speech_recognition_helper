@@ -7,12 +7,29 @@ from src.schemas.assistant import AssistantIntent, EntryKind
 from src.schemas.assistant_command import AssistantCommand, DateRelation
 from src.services.assistant import AssistantService
 from src.services.command_extractor import ExternalCommandExtractor
+from src.services.command_interpreter import CommandInterpreter
 from src.services.entries import EntryService
 from src.services.guards import restore_numbers
 from src.services.temporal import verify_creation_fields
 
 
 class ReportRegressionsTest(unittest.TestCase):
+    def test_title_reply_does_not_become_an_unverified_date(self):
+        pending = AssistantCommand(action=AssistantIntent.create_entry,
+                                   kind=EntryKind.task)
+        proposed = AssistantCommand(
+            action=AssistantIntent.create_entry, title='Купить хлеб',
+            date=datetime.date(2026, 10, 30), date_phrase='Купить хлеб',
+            date_relation=DateRelation.exact, date_unverified=True,
+        )
+        result = CommandInterpreter().resolve(
+            proposed, text='Купить хлеб', today=datetime.date(2026, 10, 30),
+            previous=pending, state=None, continuation=True, resolved_time=None,
+        )
+        self.assertEqual(result.command.title, 'Купить хлеб')
+        self.assertIsNone(result.command.date)
+        self.assertIsNone(result.command.date_unverified)
+
     def test_absolute_past_date_is_not_repeated(self):
         note = AssistantService._past_note(datetime.date(2024, 1, 7), '14:45')
         self.assertIn('2024', note)

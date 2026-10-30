@@ -14,7 +14,7 @@ from src.services import assistant as assistant_module
 from src.services.assistant import AssistantService
 from src.services.command_extractor import (ExternalCommandExtractor,
                                             InvalidModelResponseError, SpecialMutation,
-                                            TurnKind, TurnRoute)
+                                            TurnDecision, TurnKind, TurnRoute)
 from src.services.entries import EntryService
 from tests.test_our_features import Conversations, NOW, RecurringRepository, TODAY, TZ
 
@@ -45,6 +45,67 @@ class TurnRoutingTests(unittest.TestCase):
 
     def tearDown(self):
         assistant_module._now.reset(self.token)
+
+    def test_unified_turn_extracts_action_with_one_model_call(self):
+        class Primary:
+            calls = 0
+
+            def complete_json(self, system_prompt, user_prompt, json_schema):
+                self.calls += 1
+                self.assert_schema = set(json_schema['properties'])
+                return {'kind': 'command', 'reply': None, 'command': {
+                    'action': 'create_entry', 'kind': 'task',
+                    'title': 'Проверить сроки по проекту',
+                }}
+
+        primary = Primary()
+        extractor = ExternalCommandExtractor(primary, semantic_routing=True)
+        decision = extractor.interpret_turn('Проверить сроки по проекту', TZ, TODAY)
+        self.assertEqual(decision.kind, TurnKind.command)
+        self.assertEqual(decision.command.action, AssistantIntent.create_entry)
+        self.assertEqual(decision.command.kind, EntryKind.task)
+        self.assertEqual(primary.calls, 1)
+        self.assertEqual(primary.assert_schema, {'kind', 'command', 'reply'})
+
+    def test_unified_pending_reply_extracts_fields_with_one_model_call(self):
+        class Primary:
+            calls = 0
+
+            def complete_json(self, system_prompt, user_prompt, json_schema):
+                self.calls += 1
+                return {'kind': 'pending_reply',
+                        'reply': {'act': 'continue_command', 'choice': None,
+                                  'schedule_role': 'none'},
+                        'command': {'action': 'create_entry', 'title': 'Купить хлеб'}}
+
+        primary = Primary()
+        extractor = ExternalCommandExtractor(primary, semantic_routing=True)
+        decision = extractor.interpret_turn(
+            'Купить хлеб', TZ, TODAY,
+            pending=AssistantCommand(action=AssistantIntent.create_entry,
+                                     kind=EntryKind.task),
+        )
+        self.assertEqual(decision.reply.act, ReplyAct.continue_command)
+        self.assertEqual(decision.command.title, 'Купить хлеб')
+        self.assertEqual(primary.calls, 1)
+
+    def test_unified_search_does_not_repeat_intent_review(self):
+        class Primary:
+            calls = 0
+
+            def complete_json(self, system_prompt, user_prompt, json_schema):
+                self.calls += 1
+                return {'kind': 'command', 'reply': None, 'command': {
+                    'action': 'search_entries', 'query': 'проект',
+                    'date_from': TODAY.isoformat(), 'date_to': TODAY.isoformat(),
+                }}
+
+        primary = Primary()
+        decision = ExternalCommandExtractor(
+            primary, intent_review=True, semantic_routing=True,
+        ).interpret_turn('Покажи записи про проект сегодня', TZ, TODAY)
+        self.assertEqual(decision.command.action, AssistantIntent.search_entries)
+        self.assertEqual(primary.calls, 1)
 
     def test_model_command_prevents_lexical_undo(self):
         extractor = RoutedExtractor(TurnKind.command)
@@ -188,6 +249,15 @@ class TurnRoutingTests(unittest.TestCase):
         self.assertEqual([call[0] for call in extractor.calls],
                          ['route', 'split', 'route', 'extract'])
 
+    def test_missed_batch_route_asks_model_to_check_independent_clauses(self):
+        text = 'Создай задачу А и создай задачу Б'
+        extractor = RoutedExtractor(TurnKind.command)
+        AssistantService(extractor, conversations=Conversations()).handle_message(
+            text, TZ, None,
+        )
+        self.assertEqual([call[0] for call in extractor.calls],
+                         ['route', 'split', 'route', 'extract'])
+
     def test_unsplittable_model_batch_does_not_execute_first_part(self):
         text = 'Создай задачу А и задачу Б'
         extractor = RoutedExtractor({text: TurnKind.batch})
@@ -265,8 +335,8 @@ class TurnRoutingTests(unittest.TestCase):
 
             def complete_json(self, system_prompt, user_prompt, json_schema):
                 self.calls.append(set(json_schema['properties']))
-                if set(json_schema['properties']) == {'kind'}:
-                    return {'kind': 'set_priority'}
+                if set(json_schema['properties']) == {'kind', 'command', 'reply'}:
+                    return {'kind': 'set_priority', 'command': None, 'reply': None}
                 return {
                     'operation': 'set_priority',
                     'target_phrase': None,
@@ -297,7 +367,7 @@ class TurnRoutingTests(unittest.TestCase):
         self.assertEqual(turn.status, AssistantStatus.completed)
         self.assertEqual(getattr(repository.get(entry.id).priority, 'value',
                                  repository.get(entry.id).priority), 'high')
-        self.assertEqual(primary.calls[0], {'kind'})
+        self.assertEqual(primary.calls[0], {'kind', 'command', 'reply'})
         self.assertEqual(primary.calls[1], {
             'operation', 'target_phrase', 'reference_phrase', 'value_phrase',
             'priority', 'lead_minutes',

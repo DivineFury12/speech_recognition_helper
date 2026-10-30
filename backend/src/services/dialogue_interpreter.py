@@ -7,11 +7,11 @@ import re
 
 from src.ports.command_extractor import CommandExtractor
 from src.ports.conversations import ConversationState
-from src.schemas.assistant import AssistantIntent, Entry, EntryKind
+from src.schemas.assistant import AssistantIntent, Entry
 from src.schemas.assistant_command import AssistantCommand
 from src.schemas.dialogue import (DialogueTransition, PendingReply, PendingStep,
                                   ReplyAct, ScheduleRole, transition_for_reply)
-from src.services.command_extractor import TurnKind
+from src.services.command_extractor import TurnDecision, TurnKind
 from src.services.entries import EntryService
 from src.services.selection import selection_is_grounded
 from src.services.temporal import (ambiguous_time_options, parse_date, parse_period,
@@ -28,7 +28,6 @@ class DialoguePlan:
     reply: PendingReply | None
     transition: DialogueTransition | None
     preextracted: AssistantCommand | None
-    task_fallback: AssistantCommand | None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -228,29 +227,35 @@ class DialogueInterpreter:
                 question=question, candidates=candidates, pending=command,
                 history=state.model_history(),
             )
-            if reply.act == ReplyAct.select:
-                if step == PendingStep.time_choice:
-                    valid = reply.choice in (1, 2) and reply.schedule_role == ScheduleRole.none
-                elif step == PendingStep.candidate:
-                    valid = reply.choice is not None and 1 <= reply.choice <= len(candidates)
-                    if valid and self._entries is not None:
-                        entry_options = [self._entries.get(entry_id)
-                                         for entry_id in command.candidate_ids]
-                        valid = all(entry is not None for entry in entry_options)
-                        if valid:
-                            valid = selection_is_grounded(
-                                text, reply.choice, entry_options, today, reply.schedule_role,
-                            )
-                else:
-                    valid = False
-                if not valid:
-                    return PendingReply(act=ReplyAct.unclear)
-            elif reply.schedule_role != ScheduleRole.none:
-                return PendingReply(act=ReplyAct.unclear)
-            return reply
+            return self._validate_reply(reply, text, command, candidates, today)
         except Exception:
             logger.warning('Pending reply classifier unavailable', exc_info=True)
             return None
+
+    def _validate_reply(self, reply: PendingReply, text: str,
+                        command: AssistantCommand, candidates: list[dict],
+                        today: datetime.date) -> PendingReply:
+        step = self.pending_step(command)
+        if reply.act == ReplyAct.select:
+            if step == PendingStep.time_choice:
+                valid = reply.choice in (1, 2) and reply.schedule_role == ScheduleRole.none
+            elif step == PendingStep.candidate:
+                valid = reply.choice is not None and 1 <= reply.choice <= len(candidates)
+                if valid and self._entries is not None:
+                    entry_options = [self._entries.get(entry_id)
+                                     for entry_id in command.candidate_ids]
+                    valid = all(entry is not None for entry in entry_options)
+                    if valid:
+                        valid = selection_is_grounded(
+                            text, reply.choice, entry_options, today, reply.schedule_role,
+                        )
+            else:
+                valid = False
+            if not valid:
+                return PendingReply(act=ReplyAct.unclear)
+        elif reply.schedule_role != ScheduleRole.none:
+            return PendingReply(act=ReplyAct.unclear)
+        return reply
 
     @staticmethod
     def _independent_command(command: AssistantCommand, previous: AssistantCommand) -> bool:
@@ -281,27 +286,10 @@ class DialogueInterpreter:
             return bool(command.query or command.date_from and command.date_to)
         return False
 
-    @staticmethod
-    def _task_fallback(text: str, today: datetime.date) -> AssistantCommand | None:
-        match = re.match(
-            r'^\s*(?:мне\s+)?(?:надо|нужно|необходимо)\s+(?:бы\s+)?(?P<title>.+)$',
-            text, re.IGNORECASE,
-        )
-        if match is None or re.search(
-            r'\b(?:отметить|удалить|убрать|перенести|переименовать|изменить)\b',
-            match.group('title').casefold(),
-        ):
-            return None
-        return AssistantCommand(
-            action=AssistantIntent.create_entry, kind=EntryKind.task,
-            title=match.group('title').strip(' .!?'),
-            date=parse_date(text, today), time=parse_time(text),
-        )
-
     def plan(
         self, text: str, timezone: str, today: datetime.date,
         state: ConversationState | None,
-        *, route: TurnKind | None = None,
+        *, route: TurnKind | None = None, decision: TurnDecision | None = None,
     ) -> DialoguePlan:
         previous = state.pending_command if state else None
         history = state.model_history() if state else []
@@ -310,16 +298,31 @@ class DialogueInterpreter:
             reply = None
         elif route not in (None, TurnKind.pending_reply):
             reply = PendingReply(act=ReplyAct.new_command)
+        elif decision is not None and decision.reply is not None:
+            candidates = []
+            if previous.candidate_ids and self._entries is not None:
+                for number, entry_id in enumerate(previous.candidate_ids, 1):
+                    entry = self._entries.get(entry_id)
+                    if entry is not None:
+                        candidates.append({'number': number, 'title': entry.title,
+                                           'date': entry.date.isoformat() if entry.date else None,
+                                           'time': entry.time})
+            reply = self._validate_reply(decision.reply, text, previous, candidates, today)
         else:
             reply = self._classify(text, previous, state, today)
+        if (previous is not None and reply is None and route is None
+                and step in (PendingStep.fields, PendingStep.update_details)
+                and (parse_date(text, today) is not None or parse_time(text) is not None)):
+            # Offline continuation of an explicit pending field. This only
+            # supplies data for the saved action; it never reclassifies intent.
+            reply = PendingReply(act=ReplyAct.continue_command)
         transition = transition_for_reply(step, reply.act) if reply is not None else None
-        preextracted = None
-        task_fallback = self._task_fallback(text, today) if route is None else None
+        preextracted = decision.command if decision is not None else None
         independent = None
 
         if previous is not None and reply is not None and reply.act == ReplyAct.new_command:
             try:
-                independent = self._extractor.extract(
+                independent = preextracted or self._extractor.extract(
                     text=text, timezone=timezone, today=today, previous=None, history=history,
                 )
                 if (route is None and independent.action == AssistantIntent.create_entry
@@ -390,10 +393,7 @@ class DialogueInterpreter:
                     r'поставь|покажи|найди|поищи)\b', text.casefold(),
                 ):
                     transition = DialogueTransition.new_command
-            if route is None and task_fallback is not None and previous.kind != EntryKind.task:
-                transition = DialogueTransition.new_command
-                preextracted = task_fallback
             if transition == DialogueTransition.new_command:
                 previous = None
 
-        return DialoguePlan(previous, step, reply, transition, preextracted, task_fallback)
+        return DialoguePlan(previous, step, reply, transition, preextracted)

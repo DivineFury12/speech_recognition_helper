@@ -480,8 +480,11 @@ class EntryFlowTests(unittest.TestCase):
         extractor = ReplyExtractor(
             AssistantCommand(action=AssistantIntent.create_entry,
                              kind=EntryKind.reminder, title='Позвонить Ивану'),
-            [PendingReply(act=ReplyAct.continue_command)],
+            [PendingReply(act=ReplyAct.new_command)],
         )
+        extractor.command = [extractor.command,
+                             AssistantCommand(action=AssistantIntent.create_entry,
+                                              kind=EntryKind.task, title='Купить молоко')]
         service = AssistantService(extractor, EntryService(repository), conversations)
         question = service.handle_message('Напомни позвонить Ивану', 'Europe/Moscow', None)
         self.assertEqual(question.status, AssistantStatus.needs_clarification)
@@ -676,14 +679,15 @@ class EntryFlowTests(unittest.TestCase):
         self.assertEqual(deleted.status, AssistantStatus.completed)
         self.assertIsNone(repository.get(film.id))
 
-    def test_vague_film_move_finds_candidate_without_model_target_query(self):
+    def test_film_move_finds_candidate_from_model_target_query(self):
         repository = FakeRepository()
         entries = EntryService(repository)
         film = entries.create(kind=EntryKind.reminder, title='посмотреть фильм',
                               date=datetime.date(2026, 10, 18), time='18:00',
                               timezone='Europe/Moscow')
         service = AssistantService(FakeExtractor(AssistantCommand.model_validate({
-            'action': 'update_entry',
+            'action': 'update_entry', 'update_mode': 'move',
+            'target_query': 'просмотр фильма',
         })), entries, FakeConversations())
         question = service.handle_message('Перенеси просмотр фильма',
                                           'Europe/Moscow', None)
@@ -695,24 +699,24 @@ class EntryFlowTests(unittest.TestCase):
         self.assertIn('На какую дату или время перенести', selected.assistant_text)
         self.assertEqual(repository.get(film.id).date, datetime.date(2026, 10, 18))
 
-    def test_future_obligation_creates_task_even_if_model_says_complete(self):
+    def test_wrong_completion_intent_does_not_create_a_record(self):
         repository = FakeRepository()
         service = AssistantService(FakeExtractor(AssistantCommand.model_validate({
             'action': 'complete_entry', 'target_query': 'проверочный отчёт',
         })), EntryService(repository), FakeConversations())
         turn = service.handle_message('Надо бы закончить проверочный отчёт',
                                       'Europe/Moscow', None)
-        self.assertEqual(turn.status, AssistantStatus.completed)
-        self.assertEqual(turn.intent, AssistantIntent.create_entry)
-        self.assertEqual(turn.entries[0].title, 'Закончить проверочный отчёт')
+        self.assertNotEqual(turn.status, AssistantStatus.completed)
+        self.assertEqual(repository.items, [])
 
-    def test_explicit_delete_pronoun_overrides_wrong_update_intent(self):
+    def test_model_delete_pronoun_requires_confirmation(self):
         repository = FakeRepository()
         service = AssistantService(FakeExtractor([
             AssistantCommand.model_validate({
                 'action': 'create_entry', 'kind': 'task', 'title': 'Проверочный отчёт',
             }),
-            AssistantCommand.model_validate({'action': 'update_entry'}),
+            AssistantCommand.model_validate({'action': 'delete_entry',
+                                             'target_reference_phrase': 'её'}),
         ]), EntryService(repository), FakeConversations())
         created = service.handle_message('Создай задачу Проверочный отчёт', 'Europe/Moscow', None)
         asked = service.handle_message('Удали её', 'Europe/Moscow', created.conversation_id)
@@ -763,7 +767,8 @@ class EntryFlowTests(unittest.TestCase):
                 'action': 'create_entry', 'kind': 'meeting', 'title': 'Встреча с Иваном',
                 'date': today.isoformat(), 'time': '10:00',
             }),
-            AssistantCommand.model_validate({'action': 'update_entry'}),
+            AssistantCommand.model_validate({'action': 'update_entry', 'update_mode': 'move',
+                                             'target_reference_phrase': 'её'}),
             AssistantCommand.model_validate({'action': 'unknown'}),
         ]), EntryService(FakeRepository()), FakeConversations())
         created = service.handle_message('Создай встречу с Иваном сегодня в 10:00', 'Europe/Moscow', None)
@@ -776,7 +781,7 @@ class EntryFlowTests(unittest.TestCase):
         self.assertEqual(moved.entries[0].duration_minutes, 30)
         self.assertEqual(moved.entries[0].time, '10:00')
 
-    def test_explicit_move_verb_recovers_unknown_model_intent(self):
+    def test_model_move_uses_last_entry_reference(self):
         repository = FakeRepository()
         entries = EntryService(repository)
         conversations = FakeConversations()
@@ -786,7 +791,9 @@ class EntryFlowTests(unittest.TestCase):
                 'action': 'create_entry', 'kind': 'meeting', 'title': 'Встреча с Иваном',
                 'date': (today + datetime.timedelta(days=3)).isoformat(), 'time': '16:00',
             }),
-            AssistantCommand.model_validate({'action': 'unknown'}),
+            AssistantCommand.model_validate({'action': 'update_entry', 'update_mode': 'move',
+                                             'target_reference_phrase': 'её',
+                                             'date': (today + datetime.timedelta(days=1)).isoformat()}),
         ]), entries, conversations)
         created = service.handle_message('Создай встречу с Иваном', 'Europe/Moscow', None)
         moved = service.handle_message('А перенеси её на завтра', 'Europe/Moscow', created.conversation_id)
@@ -796,7 +803,7 @@ class EntryFlowTests(unittest.TestCase):
         self.assertEqual(moved.entries[0].date, today + datetime.timedelta(days=1))
         self.assertEqual(moved.entries[0].time, '16:00')
 
-    def test_explicit_move_verb_recovers_wrong_create_intent(self):
+    def test_wrong_create_intent_does_not_move_existing_entry(self):
         repository = FakeRepository()
         entries = EntryService(repository)
         conversations = FakeConversations()
@@ -810,9 +817,9 @@ class EntryFlowTests(unittest.TestCase):
         ]), entries, conversations)
         created = service.handle_message('Создай встречу с Иваном', 'Europe/Moscow', None)
         moved = service.handle_message('А перенеси её на завтра', 'Europe/Moscow', created.conversation_id)
-        self.assertEqual(moved.status, AssistantStatus.completed)
-        self.assertEqual(moved.entries[0].id, created.entries[0].id)
-        self.assertEqual(moved.entries[0].date, today + datetime.timedelta(days=1))
+        self.assertNotEqual(moved.status, AssistantStatus.completed)
+        self.assertEqual(repository.get(created.entries[0].id).date,
+                         today + datetime.timedelta(days=3))
 
     def test_pronoun_move_ignores_model_old_date_and_query(self):
         repository = FakeRepository()
@@ -848,7 +855,9 @@ class EntryFlowTests(unittest.TestCase):
                 'action': 'create_entry', 'kind': 'meeting', 'title': 'Встреча с Иваном',
                 'date': original_date.isoformat(), 'time': '16:00',
             }),
-            AssistantCommand.model_validate({'action': 'update_entry', 'kind': 'meeting'}),
+            AssistantCommand.model_validate({'action': 'update_entry', 'kind': 'meeting',
+                                             'update_mode': 'move',
+                                             'target_reference_phrase': 'её'}),
             AssistantCommand.model_validate({'action': 'create_entry'}),
         ])
         service = AssistantService(extractor, entries, conversations)
@@ -884,6 +893,7 @@ class EntryFlowTests(unittest.TestCase):
         service = AssistantService(FakeExtractor([
             AssistantCommand.model_validate({
                 'action': 'update_entry', 'kind': 'meeting', 'target_query': 'Встреча с Иваном',
+                'update_mode': 'move',
             }),
             AssistantCommand.model_validate({'action': 'unknown'}),
         ]), entries, FakeConversations())
@@ -915,6 +925,7 @@ class EntryFlowTests(unittest.TestCase):
                                 timezone='Europe/Moscow')
         service = AssistantService(FakeExtractor(AssistantCommand.model_validate({
             'action': 'update_entry', 'kind': 'meeting', 'target_query': 'Встреча с Иваном',
+            'update_mode': 'move',
         })), entries, FakeConversations())
         question = service.handle_message('Перенеси встречу с Иваном', 'Europe/Moscow', None)
         moved = service.handle_message('2 на завтра', 'Europe/Moscow', question.conversation_id)
@@ -937,6 +948,7 @@ class EntryFlowTests(unittest.TestCase):
         conversations = FakeConversations()
         extractor = ReplyExtractor(AssistantCommand.model_validate({
             'action': 'update_entry', 'kind': 'meeting', 'target_query': 'Встреча с Иваном',
+            'update_mode': 'move',
         }), [PendingReply(act=ReplyAct.select, choice=2,
                          schedule_role=ScheduleRole.replacement)])
         service = AssistantService(extractor, entries, conversations)
@@ -951,6 +963,7 @@ class EntryFlowTests(unittest.TestCase):
 
         extractor = ReplyExtractor(AssistantCommand.model_validate({
             'action': 'update_entry', 'kind': 'meeting', 'target_query': 'Встреча с Иваном',
+            'update_mode': 'move',
         }), [PendingReply(act=ReplyAct.select, choice=1,
                          schedule_role=ScheduleRole.existing)])
         service = AssistantService(extractor, entries, FakeConversations())
@@ -974,6 +987,7 @@ class EntryFlowTests(unittest.TestCase):
         extractor = ReplyExtractor([
             AssistantCommand.model_validate({
                 'action': 'update_entry', 'kind': 'meeting', 'target_query': 'Встреча с Иваном',
+                'update_mode': 'move',
             }),
             AssistantCommand.model_validate({
                 'action': 'list_entries', 'date_from': (today + datetime.timedelta(days=1)).isoformat(),
@@ -1010,6 +1024,7 @@ class EntryFlowTests(unittest.TestCase):
                                 timezone='Europe/Moscow')
         service = AssistantService(FakeExtractor(AssistantCommand.model_validate({
             'action': 'update_entry', 'kind': 'meeting', 'target_query': 'Проверочная встреча',
+            'update_mode': 'move',
         })), entries, FakeConversations())
         question = service.handle_message('Перенеси проверочную встречу', 'Europe/Moscow', None)
         still_ambiguous = service.handle_message('на завтра', 'Europe/Moscow',

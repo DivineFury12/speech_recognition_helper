@@ -1,0 +1,28 @@
+services:
+  api:
+    environment:
+      GIGACHAT_AUTH_KEY: ${GIGACHAT_AUTH_KEY:?Set GIGACHAT_AUTH_KEY in backend/.env}
+      SESSION_SECRET: ${SESSION_SECRET:?Set SESSION_SECRET in backend/.env}
+      ACCESS_CODE: ${ACCESS_CODE:?Set ACCESS_CODE in backend/.env}
+      COOKIE_SECURE: "true"
+  db:
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in backend/.env}
+  caddy:
+    image: caddy:2
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      APP_DOMAIN: ${APP_DOMAIN:?Set APP_DOMAIN in backend/.env}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - frontend
+    restart: unless-stopped
+
+volumes:
+  caddy-data:
+  caddy-config:

@@ -1,0 +1,14 @@
+FROM python:3.11-slim
+
+ENV PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1 HF_HOME=/cache/hf XDG_CACHE_HOME=/cache
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates ffmpeg git \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /app
+COPY requirements.inference.txt .
+RUN pip install torch==2.10.0 torchaudio==2.10.0 --index-url https://download.pytorch.org/whl/cpu
+RUN pip install -r requirements.inference.txt
+RUN pip install "gigaam[longform] @ git+https://github.com/salute-developers/GigaAM.git@7447938d791c4f3e643386ee22c33777004293a5"
+COPY inference_app.py .
+COPY src ./src
+EXPOSE 9000
+CMD ["uvicorn", "inference_app:app", "--host", "0.0.0.0", "--port", "9000"]

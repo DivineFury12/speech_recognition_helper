@@ -164,8 +164,8 @@ class FollowUpTests(unittest.TestCase):
         chat = Chat([
             command(action='create_entry', kind='task', title='распитие напитков', date=TODAY.isoformat(),
                     time='18:00', date_phrase='сегодня', time_phrase='в 18:00'),
-            command(action='update_entry', date=tomorrow, time='15:00', date_phrase='завтра',
-                    time_phrase='в 15:00'),
+            command(action='create_entry', kind='task', title='стирка', date=tomorrow,
+                    time='15:00', date_phrase='завтра', time_phrase='в 15:00'),
         ])
         chat('Поставь задачу распитие напитков сегодня в 18:00')
         turn = chat('прмвеи завтра стирка в 15 00')
@@ -173,6 +173,21 @@ class FollowUpTests(unittest.TestCase):
         titles = {e.title: (e.date, e.time) for e in chat.repository.items}
         self.assertEqual(titles['Распитие напитков'], (TODAY, '18:00'))
         self.assertEqual(titles['Стирка'], (TOMORROW, '15:00'))
+
+    def test_wrong_update_intent_does_not_mutate_last_record(self):
+        chat = Chat([
+            command(action='create_entry', kind='task', title='распитие напитков',
+                    date=TODAY.isoformat(), time='18:00', date_phrase='сегодня',
+                    time_phrase='в 18:00'),
+            command(action='update_entry', date=TOMORROW.isoformat(), time='15:00',
+                    date_phrase='завтра', time_phrase='в 15:00'),
+        ])
+        created = chat('Поставь задачу распитие напитков сегодня в 18:00')
+        turn = chat('завтра стирка в 15:00')
+        self.assertNotEqual(turn.status, AssistantStatus.completed)
+        self.assertEqual(len(chat.repository.items), 1)
+        self.assertEqual(chat.repository.items[0].id, created.entries[0].id)
+        self.assertEqual(chat.repository.items[0].date, TODAY)
 
     def test_new_request_while_yes_no_question_is_open(self):
         from src.services.assistant import AssistantService

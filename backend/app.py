@@ -13,6 +13,7 @@ import src.adapters.ffmeg
 import src.adapters.gigachat
 import src.adapters.rules_model
 import src.adapters.local_embeddings
+import src.adapters.inference_client
 import src.adapters.entry_repository
 import src.adapters.conversation_repository
 import src.adapters.assistant_request_repository
@@ -82,20 +83,34 @@ def create_app(settings: src.settings.Settings | None = None) -> fastapi.FastAPI
     async def lifespan(app: fastapi.FastAPI):
         config.cache_dir.mkdir(parents=True, exist_ok=True)
 
+        inference_client = (src.adapters.inference_client.InferenceClient(
+            config.inference_url, timeout_seconds=config.inference_timeout_seconds,
+        ) if config.inference_url else None)
+        app.state.inference_client = inference_client
+
         if config.voice_enabled:
-            transcriber = src.adapters.transcriber.GigaAMTransciber.load(
-                model_name=config.model_name,
-                requested_device=config.device,
-                cache_dir=config.cache_dir,
-            )
-            converter = src.adapters.ffmeg.FFmpegConverter(
-                timeout_seconds=config.ffmpeg_timeout_seconds,
-            )
-            app.state.transcription_service = src.services.transcriber.TranscriptionService(
-                converter=converter,
-                transcriber=transcriber,
-            )
-            app.state.health_info = {'model': config.model_name, 'device': transcriber.device}
+            if inference_client is not None:
+                app.state.transcription_service = inference_client
+                try:
+                    health = inference_client.health()
+                    app.state.health_info = {'model': health['model'], 'device': health['device']}
+                except (src.adapters.inference_client.InferenceUnavailableError,
+                        KeyError, TypeError):
+                    app.state.health_info = {'model': config.model_name, 'device': 'unavailable'}
+            else:
+                transcriber = src.adapters.transcriber.GigaAMTransciber.load(
+                    model_name=config.model_name,
+                    requested_device=config.device,
+                    cache_dir=config.cache_dir,
+                )
+                converter = src.adapters.ffmeg.FFmpegConverter(
+                    timeout_seconds=config.ffmpeg_timeout_seconds,
+                )
+                app.state.transcription_service = src.services.transcriber.TranscriptionService(
+                    converter=converter,
+                    transcriber=transcriber,
+                )
+                app.state.health_info = {'model': config.model_name, 'device': transcriber.device}
         else:
             logger.info('Голос выключен (VOICE_ENABLED=false): работаем только с текстом')
             app.state.transcription_service = None
@@ -103,11 +118,14 @@ def create_app(settings: src.settings.Settings | None = None) -> fastapi.FastAPI
 
         app.state.tts = None
         if config.tts_enabled:
-            from src.services.tts import create_engine
+            if inference_client is not None:
+                app.state.tts = src.adapters.inference_client.RemoteTTS(inference_client)
+            else:
+                from src.services.tts import create_engine
 
-            app.state.tts = create_engine(True, str(config.tts_model_dir), 'cpu')
-            if app.state.tts is not None:
-                threading.Thread(target=app.state.tts.load, daemon=True).start()
+                app.state.tts = create_engine(True, str(config.tts_model_dir), 'cpu')
+                if app.state.tts is not None:
+                    threading.Thread(target=app.state.tts.load, daemon=True).start()
 
         gigachat_client = None
         engine = None
@@ -128,10 +146,13 @@ def create_app(settings: src.settings.Settings | None = None) -> fastapi.FastAPI
             sessions, engine = src.db.create_session_factory(config.database_url)
             app.state.entries_service = src.services.entries.EntryService(
                 src.adapters.entry_repository.SqlAlchemyEntryRepository(sessions),
-                src.adapters.local_embeddings.create_embedding_model(
-                    name=config.embedding_model_name,
-                    cache_dir=str(config.cache_dir.parent / 'embeddings'),
-                ),
+                (src.adapters.inference_client.RemoteEmbeddingModel(
+                    inference_client, config.embedding_model_name,
+                ) if inference_client is not None else
+                 src.adapters.local_embeddings.create_embedding_model(
+                     name=config.embedding_model_name,
+                     cache_dir=str(config.cache_dir.parent / 'embeddings'),
+                 )),
                 topic_client=gigachat_client if config.gigachat_auth_key else None,
             )
             app.state.conversations = (
@@ -164,11 +185,14 @@ def create_app(settings: src.settings.Settings | None = None) -> fastapi.FastAPI
             app.state.conversations = None
             if gigachat_client is not None:
                 gigachat_client.close()
+            if inference_client is not None:
+                inference_client.close()
+            app.state.inference_client = None
             if engine is not None:
                 engine.dispose()
 
     app = fastapi.FastAPI(
-        title='GigaAM-v3 ASR',
+        title='Voice assistant API',
         lifespan=lifespan,
     )
     app.state.assistant_service = None
@@ -178,6 +202,7 @@ def create_app(settings: src.settings.Settings | None = None) -> fastapi.FastAPI
     app.state.transcription_service = None
     app.state.tts = None
     app.state.llm_health = None
+    app.state.inference_client = None
     app.state.voice_enabled = config.voice_enabled
     app.state.sessions = sessions_store
     app.state.assistant_limiter = RateLimiter(config.rate_limit_per_minute, 60)
@@ -227,6 +252,17 @@ def create_app(settings: src.settings.Settings | None = None) -> fastapi.FastAPI
         return fastapi.responses.JSONResponse(
             status_code=500,
             content={'detail': 'Ошибка при распознавании аудио'},
+        )
+
+    @app.exception_handler(src.adapters.inference_client.InferenceUnavailableError)
+    async def handle_inference_unavailable(
+        request: fastapi.Request,
+        exc: src.adapters.inference_client.InferenceUnavailableError,
+    ) -> fastapi.responses.JSONResponse:
+        logger.warning('Inference service unavailable: %s', exc)
+        return fastapi.responses.JSONResponse(
+            status_code=503,
+            content={'detail': 'Сервис распознавания временно недоступен'},
         )
 
     @app.exception_handler(fastapi.exceptions.RequestValidationError)

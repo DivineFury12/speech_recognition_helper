@@ -96,6 +96,15 @@ class RulesTests(unittest.TestCase):
         self.assertEqual(done.status, AssistantStatus.completed)
         self.assertEqual(done.entries[0].time, '16:00')
 
+    def test_offline_new_task_interrupts_pending_reminder(self):
+        say = self.chat()
+        asked = say('Напомни позвонить Ивану')
+        self.assertEqual(asked.status, AssistantStatus.needs_clarification)
+        created = say('Мне нужно купить молоко')
+        self.assertEqual(created.status, AssistantStatus.completed)
+        self.assertEqual(created.entries[0].kind, EntryKind.task)
+        self.assertEqual(created.entries[0].title, 'Купить молоко')
+
     def test_falls_back_when_gigachat_fails(self):
         model = FallbackModel(Broken())
         say = self.chat(model)

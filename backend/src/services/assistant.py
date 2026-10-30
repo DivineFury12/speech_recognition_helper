@@ -20,7 +20,7 @@ from src.schemas.assistant_command import AssistantCommand, DateRelation
 from src.schemas.dialogue import (DialogueTransition, PendingReply, PendingStep,
                                   ReplyAct, ScheduleRole)
 from src.services import phrasing
-from src.services.command_extractor import SpecialMutation, TurnKind, TurnRoute
+from src.services.command_extractor import SpecialMutation, TurnDecision, TurnKind, TurnRoute
 from src.services.command_interpreter import CommandInterpreter
 from src.services.conversation_context import RECENT_MESSAGES
 from src.services.dialogue_interpreter import DialogueInterpreter
@@ -536,7 +536,7 @@ class AssistantService(QuickAnswers, UndoStack):
             state = self._conversations.get(conversation_id)
             pending = state.pending_command if state else None
             state = self._refresh_summary(state)
-        route, route_error = self._classify_turn(
+        route, decision, route_error = self._classify_turn(
             text, timezone, today, state if conversation_id else None)
         if route_error is not None:
             return self._turn(conversation_id or uuid.uuid4(), text,
@@ -548,7 +548,7 @@ class AssistantService(QuickAnswers, UndoStack):
             interruption_token = _batch_interrupted.set(False)
             try:
                 first = self._handle_at(text, timezone, conversation_id, today,
-                                        route=route, route_checked=True)
+                                        route=route, decision=decision, route_checked=True)
                 interrupted = _batch_interrupted.get()
             finally:
                 _batch_interrupted.reset(interruption_token)
@@ -565,6 +565,14 @@ class AssistantService(QuickAnswers, UndoStack):
                                   AssistantCommand(action=AssistantIntent.unknown),
                                   'Не удалось надёжно разделить действия. Уточните их по одному; '
                                   'записи не изменены.', AssistantStatus.no_action, [])
+        elif (route == TurnKind.command and re.search(
+                r'\b(?:и|а|также|затем|потом)\b|;', text, re.IGNORECASE,
+        )):
+            # A route can miss a second independent action. The conjunction is
+            # only a cheap trigger; the model decides whether there are two
+            # actions and grounds each part in source token positions.
+            split = getattr(self._extractor, 'split_requests', None)
+            parts = split(text) if callable(split) else [text]
         elif route is None:
             parts = [p.strip(' ,.') for p in SPLIT_RE.split(text) if p and p.strip(' ,.')]
             if len(parts) < 2:
@@ -581,38 +589,60 @@ class AssistantService(QuickAnswers, UndoStack):
                 parts = split(text)
         if len(parts) < 2:
             return self._handle_at(text, timezone, conversation_id, today,
-                                   route=route, route_checked=True)
+                                   route=route, decision=decision, route_checked=True)
         return self._run_parts(parts, timezone, conversation_id, today)
 
     def _classify_turn(self, text: str, timezone: str, today: datetime.date, state):
+        interpret = getattr(self._extractor, 'interpret_turn', None)
         detailed = getattr(self._extractor, 'classify_turn_detailed', None)
         classify = getattr(self._extractor, 'classify_turn', None)
         classifier = detailed if callable(detailed) else classify
-        if not callable(classifier):
-            return None, None
+        if not callable(interpret) and not callable(classifier):
+            return None, None, None
         history = self._model_history(state)
         try:
-            decision = classifier(text, timezone, today,
-                                  pending=state.pending_command if state else None,
-                                  history=history)
-            if isinstance(decision, TurnRoute):
+            if callable(interpret):
+                pending = state.pending_command if state else None
+                candidates = []
+                if pending is not None and pending.candidate_ids and self._entries is not None:
+                    for index, entry_id in enumerate(pending.candidate_ids, 1):
+                        entry = self._entries.get(entry_id)
+                        if entry is not None:
+                            candidates.append({
+                                'number': index, 'title': entry.title,
+                                'date': entry.date.isoformat() if entry.date else None,
+                                'time': entry.time,
+                            })
+                question = next((item.text for item in reversed(state.messages)
+                                 if item.role == 'assistant'), None) if state else None
+                decision = interpret(
+                    text, timezone, today, pending=pending, history=history,
+                    question=question, candidates=candidates,
+                    pending_step=self._dialogue.pending_step(pending) if pending else None,
+                )
+            else:
+                decision = classifier(text, timezone, today,
+                                      pending=state.pending_command if state else None,
+                                      history=history)
+            if isinstance(decision, (TurnDecision, TurnRoute)):
                 route = decision.kind
                 if route == TurnKind.pending_reply and (state is None or state.pending_command is None):
-                    return None, 'Нет ожидающего уточнения. Повторите команду целиком.'
+                    return None, None, 'Нет ожидающего уточнения. Повторите команду целиком.'
             else:
                 route = decision
             route = self._reconcile_candidate_route(route, state, text, today)
-            return route, None
+            unified = decision if isinstance(decision, TurnDecision) and route == decision.kind else None
+            return route, unified, None
         except Exception:
             logger.warning('Turn routing unavailable', exc_info=True)
             pending = state.pending_command if state else None
             if pending is not None:
                 if pending.confirm and yes_no(text) in ('yes', 'no'):
-                    return TurnKind.pending_reply, None
+                    return TurnKind.pending_reply, None, None
                 route = self._reconcile_candidate_route(None, state, text, today)
                 if route == TurnKind.pending_reply:
-                    return route, None
-            return None, 'Не удалось надёжно определить действие. Повторите запрос; записи не изменены.'
+                    return route, None, None
+            return None, None, 'Не удалось надёжно определить действие. Повторите запрос; записи не изменены.'
 
     def _reconcile_candidate_route(self, route, state, text, today):
         """An explicitly selected stored candidate outranks a mistaken new-command route."""
@@ -1740,6 +1770,7 @@ class AssistantService(QuickAnswers, UndoStack):
     def _handle_at(
         self, text: str, timezone: str, conversation_id: uuid.UUID | None, today: datetime.date,
         *, route: TurnKind | None = None,
+        decision: TurnDecision | None = None,
         route_checked: bool = False,
     ) -> AssistantTurn:
         if (conversation_id is not None and self._conversations is not None
@@ -1749,7 +1780,7 @@ class AssistantService(QuickAnswers, UndoStack):
         conversation_id = conversation_id or uuid.uuid4()
         state = self._conversations.get(conversation_id) if self._conversations else None
         if not route_checked:
-            route, route_error = self._classify_turn(text, timezone, today, state)
+            route, decision, route_error = self._classify_turn(text, timezone, today, state)
             if route_error is not None:
                 return self._turn(conversation_id, text,
                                   AssistantCommand(action=AssistantIntent.unknown),
@@ -1762,7 +1793,8 @@ class AssistantService(QuickAnswers, UndoStack):
             guarded, state = self._guard(conversation_id, text, timezone, state, route)
             if guarded is not None:
                 return guarded
-        plan = self._dialogue.plan(text, timezone, today, state, route=route)
+        plan = self._dialogue.plan(text, timezone, today, state, route=route,
+                                   decision=decision)
 
         previous = plan.previous
         pending_step = plan.pending_step
@@ -1772,7 +1804,6 @@ class AssistantService(QuickAnswers, UndoStack):
                 and transition in (DialogueTransition.cancel, DialogueTransition.new_command)):
             _batch_interrupted.set(True)
         preextracted = plan.preextracted
-        future_task = plan.task_fallback
         if (previous is not None and pending_step == PendingStep.time_choice
                 and transition == DialogueTransition.repeat_question
                 and resolve_time_clarification(previous.time_phrase, text) is not None):
@@ -1906,7 +1937,7 @@ class AssistantService(QuickAnswers, UndoStack):
             command, text=text, today=today, previous=previous, state=state,
             continuation=(pending_reply is not None
                           and pending_reply.act == ReplyAct.continue_command),
-            resolved_time=resolved_time, task_fallback=future_task,
+            resolved_time=resolved_time,
         )
         command = resolved.command
         previous = resolved.previous
@@ -2002,18 +2033,6 @@ class AssistantService(QuickAnswers, UndoStack):
                     and state is not None and state.last_entry_id is not None and CHANGE_VERB_RE.search(text)):
                 # «Перенеси на 12 03 2027» right after talking about a record: that record is meant.
                 pronoun_reference = True
-        if (command.action == AssistantIntent.update_entry and not explicit_target and not pronoun_reference
-                and command.target_query is None and previous is None and not CHANGE_VERB_RE.search(text)
-                and (command.date is not None or command.time is not None)):
-            # «Завтра стирка в 15:00» has nothing to change: it is a new record, whatever the model said.
-            ruled = command_from_rules(text, self._today())
-            if ruled.get('action') == 'create_entry' and ruled.get('title'):
-                command = AssistantCommand(
-                    action=AssistantIntent.create_entry, kind=EntryKind(ruled.get('kind') or 'task'),
-                    title=phrasing.capitalize(ruled['title']), date=command.date or ruled.get('date'),
-                    time=command.time or ruled.get('time'),
-                    date_phrase=ruled.get('date_phrase'), time_phrase=ruled.get('time_phrase'),
-                )
         if (command.action in (AssistantIntent.update_entry, AssistantIntent.delete_entry)
                 and ONLY_THIS_RE.search(text)):
             # Keep «только эту» through clarifications: the reply «да» no longer contains the word.

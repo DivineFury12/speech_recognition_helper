@@ -56,8 +56,10 @@ class GigaChatClientTests(unittest.TestCase):
 
         class FakeGigaChat:
             def complete_json(self, system_prompt, user_prompt, json_schema):
-                if set(json_schema.get('properties', {})) == {'kind'}:
-                    return {'kind': 'command'}
+                if set(json_schema.get('properties', {})) == {'kind', 'command', 'reply'}:
+                    return {'kind': 'command', 'reply': None,
+                            'command': {'action': 'create_entry', 'kind': 'task',
+                                        'title': 'Купить билеты'}}
                 return {'action': 'create_entry', 'kind': 'task', 'title': 'Купить билеты'}
 
             def close(self):

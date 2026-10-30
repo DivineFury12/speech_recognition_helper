@@ -55,6 +55,8 @@ class Settings:
     rate_limit_per_minute: int = 30
     cors_origins: tuple[str, ...] = ()
     frontend_dist: pathlib.Path | None = None
+    inference_url: str | None = None
+    inference_timeout_seconds: int = 600
 
     @classmethod
     def from_env(cls) -> 'Settings':
@@ -88,4 +90,6 @@ class Settings:
             rate_limit_per_minute=int(os.getenv('RATE_LIMIT_PER_MINUTE', '30')),
             cors_origins=tuple(o.strip() for o in os.getenv('CORS_ORIGINS', '').split(',') if o.strip()),
             frontend_dist=pathlib.Path(os.getenv('FRONTEND_DIST')) if os.getenv('FRONTEND_DIST') else None,
+            inference_url=os.getenv('INFERENCE_URL', '').strip() or None,
+            inference_timeout_seconds=int(os.getenv('INFERENCE_TIMEOUT_SECONDS', '600')),
         )

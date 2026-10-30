@@ -1,0 +1,6 @@
+fastapi
+uvicorn[standard]
+python-multipart
+httpx>=0.27,<1
+num2words
+transformers>=5,<6

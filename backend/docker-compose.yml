@@ -1,59 +1,83 @@
 services:
-  gigaam:
-    build: .
-    ports:
-      - "8000:8000"
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
     environment:
-      - GIGAAM_MODEL=${GIGAAM_MODEL:-v3_e2e_rnnt}
-      - GIGAAM_DEVICE=cuda
-      - HF_TOKEN=${HF_TOKEN:-}
-      - GIGACHAT_AUTH_KEY=${GIGACHAT_AUTH_KEY:-}
-      - GIGACHAT_SCOPE=${GIGACHAT_SCOPE:-GIGACHAT_API_PERS}
-      - GIGACHAT_MODEL=${GIGACHAT_MODEL:-GigaChat-2}
-      - EMBEDDING_MODEL=${EMBEDDING_MODEL:-intfloat/multilingual-e5-small}
-      - GIGACHAT_CA_BUNDLE=${GIGACHAT_CA_BUNDLE:-/etc/ssl/certs/ca-certificates.crt}
-      - POSTGRES_HOST=db
-      - DATABASE_URL=${DATABASE_URL:-}
-      - POSTGRES_PORT=5432
-      - POSTGRES_USER=${POSTGRES_USER:-assistant}
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-assistant}
-      - POSTGRES_DB=${POSTGRES_DB:-assistant}
-      - TTS_MODEL_DIR=/cache/tts
-      - DATA_DIR=/cache/data
-      - VOICE_ENABLED=${VOICE_ENABLED:-true}
-      - ACCESS_CODE=${ACCESS_CODE:-}
-      - SESSION_SECRET=${SESSION_SECRET:-}
-      - COOKIE_SECURE=${COOKIE_SECURE:-false}
-      - RATE_LIMIT_PER_MINUTE=${RATE_LIMIT_PER_MINUTE:-30}
+      INFERENCE_URL: http://inference:9000
+      INFERENCE_TIMEOUT_SECONDS: ${INFERENCE_TIMEOUT_SECONDS:-600}
+      GIGAAM_MODEL: ${GIGAAM_MODEL:-v3_e2e_rnnt}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-e5}
+      GIGACHAT_AUTH_KEY: ${GIGACHAT_AUTH_KEY:-}
+      GIGACHAT_SCOPE: ${GIGACHAT_SCOPE:-GIGACHAT_API_PERS}
+      GIGACHAT_MODEL: ${GIGACHAT_MODEL:-GigaChat-2}
+      GIGACHAT_CA_BUNDLE: ${GIGACHAT_CA_BUNDLE:-/etc/ssl/certs/ca-certificates.crt}
+      POSTGRES_HOST: db
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: ${POSTGRES_USER:-assistant}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-assistant}
+      POSTGRES_DB: ${POSTGRES_DB:-assistant}
+      VOICE_ENABLED: ${VOICE_ENABLED:-true}
+      TTS_ENABLED: ${TTS_ENABLED:-true}
+      ACCESS_CODE: ${ACCESS_CODE:-}
+      SESSION_SECRET: ${SESSION_SECRET:-}
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      RATE_LIMIT_PER_MINUTE: ${RATE_LIMIT_PER_MINUTE:-30}
+      DATA_DIR: /data
     volumes:
-      - model-cache:/cache
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
-    restart: unless-stopped
+      - api-data:/data
     depends_on:
       db:
         condition: service_healthy
-    command: ["sh", "-c", "alembic upgrade head && exec uvicorn app:app --host 0.0.0.0 --port 8000"]
+      inference:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5)"]
+      interval: 15s
+      timeout: 7s
+      retries: 8
+      start_period: 30s
+    restart: unless-stopped
+    command: ["sh", "-c", "alembic upgrade head && exec uvicorn app:app --host 0.0.0.0 --port 8000 --proxy-headers --forwarded-allow-ips '*'"]
+
+  inference:
+    build:
+      context: .
+      dockerfile: Dockerfile.inference
+    environment:
+      GIGAAM_MODEL: ${GIGAAM_MODEL:-v3_e2e_rnnt}
+      GIGAAM_DEVICE: cpu
+      VOICE_ENABLED: ${VOICE_ENABLED:-true}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-e5}
+      HF_TOKEN: ${HF_TOKEN:-}
+      MODEL_CACHE_DIR: /cache
+      TTS_ENABLED: ${TTS_ENABLED:-true}
+      OMP_NUM_THREADS: ${OMP_NUM_THREADS:-4}
+    volumes:
+      - model-cache:/cache
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9000/health', timeout=5)"]
+      interval: 20s
+      timeout: 7s
+      retries: 10
+      start_period: 900s
+    restart: unless-stopped
 
   frontend:
     build: ../frontend
     ports:
-      - "8080:80"
+      - "127.0.0.1:8080:80"
     depends_on:
-      - gigaam
+      api:
+        condition: service_healthy
     restart: unless-stopped
 
   db:
     image: pgvector/pgvector:0.8.7-pg17-bookworm
     environment:
-      - POSTGRES_USER=${POSTGRES_USER:-assistant}
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-assistant}
-      - POSTGRES_DB=${POSTGRES_DB:-assistant}
+      POSTGRES_USER: ${POSTGRES_USER:-assistant}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-assistant}
+      POSTGRES_DB: ${POSTGRES_DB:-assistant}
     volumes:
       - postgres-data:/var/lib/postgresql/data
     healthcheck:
@@ -65,4 +89,5 @@ services:
 
 volumes:
   model-cache:
+  api-data:
   postgres-data:

@@ -105,11 +105,10 @@ class AssistantServiceTests(unittest.TestCase):
             with self.subTest(hour=hour):
                 entries = FakeEntries()
                 client = FakeModelClient([
-                    {'kind': 'command'},
-                    {'action': 'create_entry', 'kind': 'task',
-                     'title': 'Подготовить протокол', 'date_relation': 'exact',
-                     'time': '19:30',
-                     'time_phrase': 'к 19:30'},
+                    {'kind': 'command', 'reply': None,
+                     'command': {'action': 'create_entry', 'kind': 'task',
+                                 'title': 'Подготовить протокол', 'date_relation': 'exact',
+                                 'time': '19:30', 'time_phrase': 'к 19:30'}},
                 ])
                 service = AssistantService(
                     ExternalCommandExtractor(client, semantic_routing=True),
@@ -130,11 +129,11 @@ class AssistantServiceTests(unittest.TestCase):
     def test_detailed_command_determines_action_after_route(self):
         text = 'Проверить сроки по хакатону 2026-10-30 в 12:30'
         client = FakeModelClient([
-            {'kind': 'command'},
-            {'action': 'create_entry', 'kind': 'task',
-             'title': 'Проверить сроки по хакатону',
-             'date': '2026-10-30', 'date_phrase': '2026-10-30',
-             'time': '12:30', 'time_phrase': 'в 12:30'},
+            {'kind': 'command', 'reply': None,
+             'command': {'action': 'create_entry', 'kind': 'task',
+                         'title': 'Проверить сроки по хакатону',
+                         'date': '2026-10-30', 'date_phrase': '2026-10-30',
+                         'time': '12:30', 'time_phrase': 'в 12:30'}},
         ])
         entries = FakeEntries()
         service = AssistantService(
@@ -149,7 +148,8 @@ class AssistantServiceTests(unittest.TestCase):
         self.assertEqual(turn.status, AssistantStatus.completed)
         self.assertEqual(turn.intent, AssistantIntent.create_entry)
         self.assertEqual(entries.created[0][0], EntryKind.task)
-        self.assertEqual(set(client.calls[0][2]['properties']), {'kind'})
+        self.assertEqual(set(client.calls[0][2]['properties']), {'kind', 'command', 'reply'})
+        self.assertEqual(len(client.calls), 1)
 
     def test_vague_schedule_constraints_survive_missing_model_phrases(self):
         command = ExternalCommandExtractor(FakeModelClient({

@@ -2,7 +2,6 @@
 
 import dataclasses
 import datetime
-import re
 
 from src.ports.conversations import ConversationState
 from src.schemas.assistant import AssistantIntent, EntryKind
@@ -42,6 +41,19 @@ class CommandInterpreter:
     ) -> AssistantCommand:
         """A clarification cannot change the pending action without new action evidence."""
         if update.action == previous.action:
+            if (previous.action == AssistantIntent.create_entry and previous.title is None
+                    and update.title is not None):
+                # A reply to "How should I name it?" must not turn the title
+                # itself into an unverified date or clock time. Explicit
+                # schedule words in the same reply are still accepted.
+                grounded_date = parse_date(text, today)
+                grounded_time = parse_time(text)
+                return update.model_copy(update={
+                    'date': grounded_date, 'date_phrase': update.date_phrase if grounded_date else None,
+                    'date_unverified': None,
+                    'time': grounded_time, 'time_phrase': update.time_phrase if grounded_time else None,
+                    'time_unverified': None,
+                })
             if (previous.action == AssistantIntent.create_entry or
                     previous.action == AssistantIntent.update_entry
                     and previous.selected_entry_id):
@@ -131,7 +143,6 @@ class CommandInterpreter:
         self, command: AssistantCommand, *, text: str, today: datetime.date,
         previous: AssistantCommand | None, state: ConversationState | None,
         continuation: bool, resolved_time: str | None,
-        task_fallback: AssistantCommand | None,
     ) -> ResolvedCommand:
         if previous is not None and continuation:
             command = self._continuation_fields(previous, command, text, today)
@@ -141,68 +152,7 @@ class CommandInterpreter:
         if unclear_time and command.action in (AssistantIntent.create_entry,
                                                AssistantIntent.update_entry):
             command = command.model_copy(update={'time': None, 'time_phrase': unclear_time})
-        if (not command.signals_verified and task_fallback is not None
-                and command.action in (AssistantIntent.unknown, AssistantIntent.complete_entry)):
-            command = task_fallback
-
-        action_evidence = command.action_phrase or text
         move_requested = command.action == AssistantIntent.update_entry and command.update_mode == UpdateMode.move
-        # The structured model owns intent classification. Lexical recovery is
-        # limited to the deterministic offline adapter, which has no semantic classifier.
-        lexical_fallback = not command.signals_verified
-        if lexical_fallback:
-            move_requested = move_requested or bool(re.search(
-                r'\b(?:перенес\w*|перенос\w*|перенести|перенеси|передвин\w*|сдвин\w*|перемест\w*)\b',
-                action_evidence.casefold(),
-            ))
-        explicit_move = lexical_fallback and bool(re.search(
-            r'\b(?:перенеси|перенести|передвинь|сдвинь|перемести)\b',
-            action_evidence.casefold(),
-        ))
-        explicit_delete = lexical_fallback and bool(re.search(
-            r'\b(?:удали|удалить|убери|убрать|сотри)\b',
-            action_evidence.casefold(),
-        ))
-        if re.search(r'\bне\s+(?:перенес\w*|переноси|передвин\w*|сдвин\w*)\b',
-                     action_evidence.casefold()):
-            explicit_move = False
-            move_requested = False
-        if re.search(r'\bне\s+(?:удал\w*|убер\w*|убир\w*|сотр\w*)\b',
-                     action_evidence.casefold()):
-            explicit_delete = False
-        if command.action != AssistantIntent.delete_entry and explicit_delete:
-            command = AssistantCommand(
-                action=AssistantIntent.delete_entry, kind=command.kind,
-                target_query=command.target_query, target_date=command.target_date,
-                target_date_phrase=command.target_date_phrase,
-                target_time=command.target_time, target_time_phrase=command.target_time_phrase,
-            )
-        if command.action != AssistantIntent.update_entry and explicit_move:
-            command = AssistantCommand(action=AssistantIntent.update_entry)
-        if command.target_query is None and (explicit_move or explicit_delete):
-            target_words = re.sub(
-                r'^\s*(?:а\s+)?(?:перенеси|перенести|передвинь|сдвинь|перемести|'
-                r'удали|удалить|убери|убрать|сотри)\s+',
-                '', text, flags=re.IGNORECASE,
-            ).strip(' \t\r\n.?!')
-            if (target_words and not re.match(r'^(?:её|ее|его|эту|этот)\b', target_words.casefold())
-                    and parse_date(target_words, today) is None
-                    and parse_time(target_words) is None
-                    and verify_search_query(target_words, text)):
-                command = command.model_copy(update={'target_query': target_words})
-        if (lexical_fallback and previous is not None and previous.selected_entry_id is not None
-                and previous.move_intent and command.action != AssistantIntent.update_entry
-                and not re.search(
-                    r'\b(?:создай|добавь|напомни|покажи|найди|удали|отметь)\b',
-                    text.casefold(),
-                )):
-            reply_date = parse_date(text, today)
-            reply_time = parse_time(text)
-            if reply_date is not None or reply_time is not None:
-                command = AssistantCommand(
-                    action=AssistantIntent.update_entry, date=reply_date, time=reply_time,
-                    time_phrase=ambiguous_time_phrase(text),
-                )
 
         explicit_target = verify_search_query(command.target_query, text) is not None
         if command.target_query is not None and not explicit_target:
@@ -222,17 +172,13 @@ class CommandInterpreter:
             if explicit_duration is not None:
                 command = command.model_copy(update={'duration_minutes': explicit_duration})
 
-        # «Перенеси его», «удали её»: a pronoun in the user's words always points at the record under
-        # discussion, even when the model did not mark target_reference_phrase.
-        pronoun_reference = command.target_reference_phrase is not None or bool(re.search(
-            r'\b(?:её|ее|его|неё|нее|него|эту|этот|эта|это)\b', text.casefold(),
-        )) and command.target_query is None
+        pronoun_reference = command.target_reference_phrase is not None
         bound_target = (previous is not None and previous.selected_entry_id is not None) or (
             state is not None and state.last_entry_id is not None and pronoun_reference
         )
         if (bound_target and command.action == AssistantIntent.update_entry
                 and command.move_intent and command.date is None and command.time is None
-                and not re.search(r'\b(?:не|нет|отмена)\b', text.casefold())):
+                and continuation):
             command = command.model_copy(update={
                 'date': parse_date(text, today), 'time': parse_time(text),
                 'time_phrase': ambiguous_time_phrase(text) or command.time_phrase,

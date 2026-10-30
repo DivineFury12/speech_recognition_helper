@@ -130,6 +130,12 @@ def services_status(request: fastapi.Request) -> ServicesStatus:
         items.append(('Распознавание речи', 'off', 'голос выключен'))
     else:
         ready = state.transcription_service is not None
+        inference = getattr(state, 'inference_client', None)
+        if ready and inference is not None:
+            try:
+                inference.health()
+            except Exception:
+                ready = False
         items.append(('Распознавание речи', 'ok' if ready else 'error',
                       'GigaAM готов' if ready else 'GigaAM недоступен'))
     tts = state.tts

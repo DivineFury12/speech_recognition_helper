@@ -100,6 +100,57 @@ class FakeModelClient:
 
 
 class AssistantServiceTests(unittest.TestCase):
+    def test_standalone_time_creates_task_on_next_available_day(self):
+        for hour, expected_day in ((10, 29), (20, 30)):
+            with self.subTest(hour=hour):
+                entries = FakeEntries()
+                client = FakeModelClient([
+                    {'kind': 'command'},
+                    {'action': 'create_entry', 'kind': 'task',
+                     'title': 'Подготовить протокол', 'date_relation': 'exact',
+                     'time': '19:30',
+                     'time_phrase': 'к 19:30'},
+                ])
+                service = AssistantService(
+                    ExternalCommandExtractor(client, semantic_routing=True),
+                    entries, FakeConversations(),
+                )
+                token = assistant_module._now.set(datetime.datetime(2026, 10, 29, hour))
+                try:
+                    turn = service.handle_message(
+                        'Подготовить протокол к 19:30', 'Europe/Moscow', None,
+                    )
+                finally:
+                    assistant_module._now.reset(token)
+                self.assertEqual(turn.status, AssistantStatus.completed)
+                self.assertEqual(entries.created[0][0], EntryKind.task)
+                self.assertEqual(entries.created[0][2:4],
+                                 (datetime.date(2026, 10, expected_day), '19:30'))
+
+    def test_detailed_command_determines_action_after_route(self):
+        text = 'Проверить сроки по хакатону 2026-10-30 в 12:30'
+        client = FakeModelClient([
+            {'kind': 'command'},
+            {'action': 'create_entry', 'kind': 'task',
+             'title': 'Проверить сроки по хакатону',
+             'date': '2026-10-30', 'date_phrase': '2026-10-30',
+             'time': '12:30', 'time_phrase': 'в 12:30'},
+        ])
+        entries = FakeEntries()
+        service = AssistantService(
+            ExternalCommandExtractor(client, semantic_routing=True),
+            entries, FakeConversations(),
+        )
+        token = assistant_module._now.set(datetime.datetime(2026, 10, 29, 10))
+        try:
+            turn = service.handle_message(text, 'Europe/Moscow', None)
+        finally:
+            assistant_module._now.reset(token)
+        self.assertEqual(turn.status, AssistantStatus.completed)
+        self.assertEqual(turn.intent, AssistantIntent.create_entry)
+        self.assertEqual(entries.created[0][0], EntryKind.task)
+        self.assertEqual(set(client.calls[0][2]['properties']), {'kind'})
+
     def test_vague_schedule_constraints_survive_missing_model_phrases(self):
         command = ExternalCommandExtractor(FakeModelClient({
             'action': 'create_entry', 'kind': 'meeting',
@@ -1722,12 +1773,13 @@ class AssistantServiceTests(unittest.TestCase):
         self.assertEqual(command.date, datetime.date(2026, 10, 18))
         self.assertEqual(command.time, '18:00')
 
-    def test_date_only_reply_completes_pending_reminder_even_if_model_says_unknown(self):
+    def test_date_only_reply_completes_reminder_with_ambiguous_day(self):
         expected_date = datetime.datetime.now(ZoneInfo('Europe/Moscow')).date() + datetime.timedelta(days=7)
         client = FakeModelClient([
             {
                 'action': 'create_entry', 'kind': 'reminder',
                 'title': 'посмотреть фильм', 'date': None,
+                'date_phrase': 'когда-нибудь', 'date_relation': 'ambiguous',
                 'time': '18:00', 'time_phrase': 'в 6 вечера',
             },
             {'act': 'continue_command', 'choice': None},
@@ -1738,7 +1790,7 @@ class AssistantServiceTests(unittest.TestCase):
             ExternalCommandExtractor(client), entries, FakeConversations(),
         )
         first = service.handle_message(
-            'Поставь напоминание посмотреть фильм в 6 вечера',
+            'Поставь напоминание посмотреть фильм когда-нибудь в 6 вечера',
             'Europe/Moscow', None,
         )
         self.assertEqual(first.status, AssistantStatus.needs_clarification)

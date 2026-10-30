@@ -104,7 +104,7 @@ def command_from_rules(text: str, today: datetime.date) -> dict:
         if kind == 'meeting' and title and re.match(r'(?i)с\s|со\s', title):
             title = f'Встреча {title}'
         if kind is None and title:
-            kind = 'reminder' if time else 'task'
+            kind = 'task'
         payload.update(action='create_entry', kind=kind,
                        title=title, date=str(day) if day else None,
                        date_phrase=date_phrase if day else None, time=time,

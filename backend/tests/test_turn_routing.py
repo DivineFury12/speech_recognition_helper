@@ -111,20 +111,25 @@ class TurnRoutingTests(unittest.TestCase):
         self.assertIn('не изменены', turn.assistant_text)
         self.assertEqual([call[0] for call in extractor.calls], ['route'])
 
-    def test_command_action_mismatch_stops_before_mutation(self):
+    def test_command_route_still_requires_delete_confirmation(self):
         class InconsistentExtractor(RoutedExtractor):
             def classify_turn_detailed(self, text, timezone, today, *, pending=None, history=None):
-                return TurnRoute(kind=TurnKind.command, action=AssistantIntent.create_entry)
+                return TurnRoute(kind=TurnKind.command)
 
             def extract(self, **kwargs):
                 return AssistantCommand(action=AssistantIntent.delete_entry,
                                         target_query='отчёт')
 
+        repository = RecurringRepository()
+        entry = repository.create(kind=EntryKind.task, title='Подготовить отчёт',
+                                  date=TODAY, time=None, timezone=TZ,
+                                  embedding=None, embedding_model='test')
         service = AssistantService(InconsistentExtractor(TurnKind.command),
-                                   conversations=Conversations())
+                                   EntryService(repository), Conversations())
         turn = service.handle_message('Удали отчёт', TZ, None)
-        self.assertEqual(turn.status, AssistantStatus.no_action)
-        self.assertIn('противоречит', turn.assistant_text)
+        self.assertEqual(turn.status, AssistantStatus.needs_clarification)
+        self.assertIn('Удалить', turn.assistant_text)
+        self.assertIsNotNone(repository.get(entry.id))
 
     def test_route_receives_saved_context(self):
         extractor = RoutedExtractor(TurnKind.command)
@@ -217,7 +222,7 @@ class TurnRoutingTests(unittest.TestCase):
 
             def complete_json(self, system_prompt, user_prompt, json_schema):
                 self.calls += 1
-                return {'kind': 'command', 'action': 'delete_entry'}
+                return {'kind': 'command'}
 
             def close(self):
                 pass
@@ -234,7 +239,7 @@ class TurnRoutingTests(unittest.TestCase):
 
             def complete_json(self, system_prompt, user_prompt, json_schema):
                 self.request = json.loads(user_prompt)
-                return {'kind': 'pending_reply', 'action': None}
+                return {'kind': 'pending_reply'}
 
             def close(self):
                 pass
@@ -260,8 +265,8 @@ class TurnRoutingTests(unittest.TestCase):
 
             def complete_json(self, system_prompt, user_prompt, json_schema):
                 self.calls.append(set(json_schema['properties']))
-                if set(json_schema['properties']) == {'kind', 'action'}:
-                    return {'kind': 'set_priority', 'action': 'update_entry'}
+                if set(json_schema['properties']) == {'kind'}:
+                    return {'kind': 'set_priority'}
                 return {
                     'operation': 'set_priority',
                     'target_phrase': None,
@@ -292,7 +297,7 @@ class TurnRoutingTests(unittest.TestCase):
         self.assertEqual(turn.status, AssistantStatus.completed)
         self.assertEqual(getattr(repository.get(entry.id).priority, 'value',
                                  repository.get(entry.id).priority), 'high')
-        self.assertEqual(primary.calls[0], {'kind', 'action'})
+        self.assertEqual(primary.calls[0], {'kind'})
         self.assertEqual(primary.calls[1], {
             'operation', 'target_phrase', 'reference_phrase', 'value_phrase',
             'priority', 'lead_minutes',

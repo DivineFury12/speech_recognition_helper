@@ -136,7 +136,7 @@ class ConversationContextTests(unittest.TestCase):
 
             def classify_turn_detailed(self, text, timezone, today, *, pending, history):
                 self.history = history
-                return TurnRoute(kind=TurnKind.command, action=AssistantIntent.unknown)
+                return TurnRoute(kind=TurnKind.command)
 
         extractor, store = Extractor(), Store()
         service = AssistantService(extractor, conversations=store)

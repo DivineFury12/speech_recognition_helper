@@ -1,6 +1,8 @@
 import datetime
 import unittest
+from unittest import mock
 
+from src.adapters.rules_model import command_from_rules
 from src.schemas.assistant import AssistantIntent, EntryKind
 from src.schemas.assistant_command import AssistantCommand, DateRelation
 from src.services.assistant import AssistantService
@@ -17,12 +19,35 @@ class ReportRegressionsTest(unittest.TestCase):
         self.assertIn('уже прошла', note)
         self.assertNotIn(' — это ', note)
 
-    def test_time_without_date_requires_clarification_even_for_task(self):
+    def test_standalone_clock_time_uses_next_occurrence_without_changing_type(self):
         command = AssistantCommand(
             action=AssistantIntent.create_entry, kind=EntryKind.task,
             title='Отправить отчёт', time='11:15',
         )
+        with mock.patch.object(AssistantService, '_now', return_value=datetime.datetime(2026, 10, 29, 10)):
+            today = AssistantService._anchor_standalone_time(command)
+        with mock.patch.object(AssistantService, '_now', return_value=datetime.datetime(2026, 10, 29, 12)):
+            tomorrow = AssistantService._anchor_standalone_time(command)
+        self.assertEqual(today.date, datetime.date(2026, 10, 29))
+        self.assertEqual(tomorrow.date, datetime.date(2026, 10, 30))
+        self.assertEqual(today.kind, EntryKind.task)
+        self.assertEqual(tomorrow.kind, EntryKind.task)
+        self.assertNotIn('дату', AssistantService._missing(today))
+
+    def test_standalone_time_does_not_resolve_an_ambiguous_period(self):
+        command = AssistantCommand(
+            action=AssistantIntent.create_entry, kind=EntryKind.task,
+            title='Подготовить отчёт', time='11:15',
+            date_relation=DateRelation.period,
+        )
+        self.assertIsNone(AssistantService._anchor_standalone_time(command).date)
         self.assertIn('дату', AssistantService._missing(command))
+
+    def test_offline_fallback_does_not_turn_timed_work_into_reminder(self):
+        command = command_from_rules('Подготовить протокол к 19:30', datetime.date(2026, 10, 29))
+        self.assertEqual(command['action'], 'create_entry')
+        self.assertEqual(command['kind'], 'task')
+        self.assertEqual(command['time'], '19:30')
 
     def test_clock_expression_cannot_justify_model_proposed_date(self):
         command = AssistantCommand(
